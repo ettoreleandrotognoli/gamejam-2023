@@ -85,7 +85,8 @@ impl Plugin for GamePlugin {
             .add_systems(Startup, spawn_player_system)
             .add_systems(Update, player_move_system)
             .add_systems(Update, player_swap_scale_system)
-            .add_systems(Update, scale_system);
+            .add_systems(Update, scale_system)
+            .add_systems(Update, despawn_out_of_view);
     }
 }
 
@@ -103,7 +104,12 @@ pub fn spawn_world(mut commands: Commands) {
 }
 
 pub fn spawn_camera_system(mut commands: Commands) {
-    commands.spawn(Camera2dBundle::default());
+    commands
+        .spawn(Camera2dBundle::default())
+        .insert(Sleeping::disabled())
+        .insert(Ccd::enabled())
+        .insert(RigidBody::KinematicVelocityBased)
+        .insert(Velocity::linear(Vec2::new(0., 50.)));
 }
 
 pub fn spawn_player_system(
@@ -120,6 +126,7 @@ pub fn spawn_player_system(
         .insert(Collider::ball(32.))
         .insert(Sleeping::disabled())
         .insert(Ccd::enabled())
+        .insert(CollidingEntities::default())
         .insert(RigidBody::KinematicVelocityBased)
         .insert(MaterialMesh2dBundle {
             mesh: circle.into(),
@@ -155,5 +162,14 @@ pub fn player_swap_scale_system(
 pub fn scale_system(time: Res<Time>, mut query: Query<(&Scale, &mut Transform)>) {
     for (scale, mut transform) in query.iter_mut() {
         transform.scale *= 1. + (scale.speed * time.delta_seconds());
+    }
+}
+
+pub fn despawn_out_of_view(mut commands: Commands, query: Query<(Entity, &ViewVisibility)>) {
+    for (entity, view_visibility) in query.iter() {
+        if !view_visibility.get() {
+            //commands.entity(entity).despawn_recursive();
+            println!("despawn {:?}", entity);
+        }
     }
 }
