@@ -4,7 +4,30 @@ use leafwing_input_manager::prelude::*;
 pub struct GamePlugins;
 
 #[derive(Actionlike, PartialEq, Eq, Clone, Copy, Hash, Debug, Reflect)]
-pub enum PlayerAction {}
+pub enum PlayerAction {
+    MOVE,
+}
+
+fn create_input_map() -> InputMap<PlayerAction> {
+    let mut input_map = InputMap::default();
+    input_map.insert(
+        VirtualDPad {
+            up: KeyCode::W.into(),
+            down: KeyCode::S.into(),
+            left: KeyCode::A.into(),
+            right: KeyCode::D.into(),
+        },
+        PlayerAction::MOVE,
+    );
+    input_map
+}
+
+fn create_input_manager() -> InputManagerBundle<PlayerAction> {
+    InputManagerBundle {
+        action_state: ActionState::default(),
+        input_map: create_input_map(),
+    }
+}
 
 impl PluginGroup for GamePlugins {
     fn build(self) -> PluginGroupBuilder {
@@ -34,7 +57,8 @@ pub struct GamePlugin {}
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_camera_system)
-            .add_systems(Startup, spawn_player_system);
+            .add_systems(Startup, spawn_player_system)
+            .add_systems(Update, player_move_system);
     }
 }
 
@@ -64,8 +88,8 @@ pub fn spawn_player_system(
     let circle = meshes.add(shape::Circle::new(32.).into());
     commands
         .spawn(Player::default())
+        .insert(create_input_manager())
         .insert(Collider::ball(32.))
-        .insert(Velocity::linear(Vec2::new(0., 1.)))
         .insert(Sleeping::disabled())
         .insert(Ccd::enabled())
         .insert(RigidBody::KinematicVelocityBased)
@@ -74,4 +98,18 @@ pub fn spawn_player_system(
             material: material,
             ..Default::default()
         });
+}
+
+pub fn player_move_system(
+    mut commands: Commands,
+    query: Query<(Entity, &ActionState<PlayerAction>), With<Player>>,
+) {
+    let speed = 100.;
+    for (entity, action_state) in query.iter() {
+        if let Some(move_axis_pair) = action_state.axis_pair(PlayerAction::MOVE) {
+            let direction = move_axis_pair.xy();
+            let speed = direction.normalize_or_zero() * speed;
+            commands.entity(entity).insert(Velocity::linear(speed));
+        }
+    }
 }
