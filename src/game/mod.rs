@@ -5,7 +5,8 @@ pub struct GamePlugins;
 
 #[derive(Actionlike, PartialEq, Eq, Clone, Copy, Hash, Debug, Reflect)]
 pub enum PlayerAction {
-    MOVE,
+    Move,
+    SwapScale,
 }
 
 fn create_input_map() -> InputMap<PlayerAction> {
@@ -17,8 +18,18 @@ fn create_input_map() -> InputMap<PlayerAction> {
             left: KeyCode::A.into(),
             right: KeyCode::D.into(),
         },
-        PlayerAction::MOVE,
+        PlayerAction::Move,
     );
+    input_map.insert(
+        VirtualDPad {
+            up: KeyCode::Up.into(),
+            down: KeyCode::Down.into(),
+            left: KeyCode::Left.into(),
+            right: KeyCode::Right.into(),
+        },
+        PlayerAction::Move,
+    );
+    input_map.insert(KeyCode::Space, PlayerAction::SwapScale);
     input_map
 }
 
@@ -43,8 +54,22 @@ impl PluginGroup for GamePlugins {
         group
     }
 }
+
+//#[derive(Component)]
+
 #[derive(Component)]
 pub struct Player {}
+
+#[derive(Component)]
+pub struct Scale {
+    speed: f32,
+}
+
+impl Scale {
+    pub fn swap(&mut self) {
+        self.speed = -self.speed;
+    }
+}
 
 impl Default for Player {
     fn default() -> Self {
@@ -58,7 +83,9 @@ impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, spawn_camera_system)
             .add_systems(Startup, spawn_player_system)
-            .add_systems(Update, player_move_system);
+            .add_systems(Update, player_move_system)
+            .add_systems(Update, player_swap_scale_system)
+            .add_systems(Update, scale_system);
     }
 }
 
@@ -89,6 +116,7 @@ pub fn spawn_player_system(
     commands
         .spawn(Player::default())
         .insert(create_input_manager())
+        .insert(Scale { speed: 0.25 })
         .insert(Collider::ball(32.))
         .insert(Sleeping::disabled())
         .insert(Ccd::enabled())
@@ -106,10 +134,26 @@ pub fn player_move_system(
 ) {
     let speed = 100.;
     for (entity, action_state) in query.iter() {
-        if let Some(move_axis_pair) = action_state.axis_pair(PlayerAction::MOVE) {
+        if let Some(move_axis_pair) = action_state.axis_pair(PlayerAction::Move) {
             let direction = move_axis_pair.xy();
             let speed = direction.normalize_or_zero() * speed;
             commands.entity(entity).insert(Velocity::linear(speed));
         }
+    }
+}
+
+pub fn player_swap_scale_system(
+    mut query: Query<(&mut Scale, &ActionState<PlayerAction>), With<Player>>,
+) {
+    for (mut scale, action_state) in query.iter_mut() {
+        if action_state.just_pressed(PlayerAction::SwapScale) {
+            scale.swap();
+        }
+    }
+}
+
+pub fn scale_system(time: Res<Time>, mut query: Query<(&Scale, &mut Transform)>) {
+    for (scale, mut transform) in query.iter_mut() {
+        transform.scale *= 1. + (scale.speed * time.delta_seconds());
     }
 }
