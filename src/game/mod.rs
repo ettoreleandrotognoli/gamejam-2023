@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bevy::{app::PluginGroupBuilder, prelude::*, sprite::MaterialMesh2dBundle};
 use bevy_rapier2d::prelude::*;
 use leafwing_input_manager::prelude::*;
@@ -55,7 +57,8 @@ impl PluginGroup for GamePlugins {
     }
 }
 
-//#[derive(Component)]
+#[derive(Component)]
+pub struct X {}
 
 #[derive(Component)]
 pub struct Player {}
@@ -81,11 +84,15 @@ pub struct GamePlugin {}
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_camera_system)
+        app.add_event::<SpawnXEvent>()
+            .add_systems(Startup, spawn_world)
+            .add_systems(Startup, spawn_camera_system)
             .add_systems(Startup, spawn_player_system)
             .add_systems(Update, player_move_system)
             .add_systems(Update, player_swap_scale_system)
             .add_systems(Update, scale_system)
+            .add_systems(Update, x_factory_system)
+            .add_systems(Update, spawn_x_system)
             .add_systems(Update, despawn_out_of_view);
     }
 }
@@ -101,6 +108,9 @@ pub fn spawn_world(mut commands: Commands) {
         gravity: Vec2::ZERO,
         ..default()
     });
+    commands.spawn(XFactoryComponent {
+        timer: Timer::new(Duration::from_secs(1), TimerMode::Repeating),
+    });
 }
 
 pub fn spawn_camera_system(mut commands: Commands) {
@@ -110,6 +120,84 @@ pub fn spawn_camera_system(mut commands: Commands) {
         .insert(Ccd::enabled())
         .insert(RigidBody::KinematicVelocityBased)
         .insert(Velocity::linear(Vec2::new(0., 50.)));
+}
+
+#[derive(Component)]
+pub struct XFactoryComponent {
+    timer: Timer,
+}
+
+impl XFactoryComponent {
+    pub fn tick(&mut self, delta: Duration) {
+        self.timer.tick(delta);
+    }
+
+    pub fn create(
+        &mut self,
+        camera_info: (&Transform, &Velocity),
+        player_info: (&Transform),
+        event: &mut EventWriter<SpawnXEvent>,
+    ) {
+        let (camera_transform, camera_velocity) = camera_info;
+        let camera_direction = camera_velocity.linvel.normalize_or_zero();
+        let position = camera_transform.translation + (camera_direction * 100.).extend(0.);
+        if !self.timer.just_finished() {
+            return;
+        }
+        event.send(SpawnXEvent {
+            color: Color::RED,
+            position: position,
+            radius: 32.,
+        })
+    }
+}
+
+#[derive(Event, Debug)]
+pub struct SpawnXEvent {
+    pub color: Color,
+    pub position: Vec3,
+    pub radius: f32,
+}
+
+pub fn x_factory_system(
+    time: Res<Time>,
+    mut query: Query<(&mut XFactoryComponent)>,
+    mut events: EventWriter<SpawnXEvent>,
+    camera_query: Query<(&Transform, &Velocity), With<Camera>>,
+    player_query: Query<&Transform, With<Player>>,
+) {
+    if let Ok(camera_info) = camera_query.get_single() {
+        if let Ok(player_info) = player_query.get_single() {
+            for (mut factory) in query.iter_mut() {
+                factory.tick(time.delta());
+                factory.create(camera_info, player_info, &mut events);
+            }
+        }
+    }
+}
+
+pub fn spawn_x_system(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    mut events: EventReader<SpawnXEvent>,
+) {
+    for event in events.read() {
+        let material = materials.add(ColorMaterial::from(event.color));
+        let circle = meshes.add(shape::Circle::new(event.radius).into());
+        commands
+            .spawn(X {})
+            .insert(Collider::ball(event.radius))
+            .insert(Sleeping::disabled())
+            .insert(RigidBody::Fixed)
+            .insert(Sensor::default())
+            .insert(MaterialMesh2dBundle {
+                mesh: circle.into(),
+                material: material,
+                transform: Transform::from_translation(event.position),
+                ..Default::default()
+            });
+    }
 }
 
 pub fn spawn_player_system(
@@ -165,10 +253,13 @@ pub fn scale_system(time: Res<Time>, mut query: Query<(&Scale, &mut Transform)>)
     }
 }
 
-pub fn despawn_out_of_view(mut commands: Commands, query: Query<(Entity, &ViewVisibility)>) {
+pub fn despawn_out_of_view(
+    mut commands: Commands,
+    query: Query<(Entity, &ViewVisibility), Without<Player>>,
+) {
     for (entity, view_visibility) in query.iter() {
         if !view_visibility.get() {
-            //commands.entity(entity).despawn_recursive();
+            commands.entity(entity).despawn_recursive();
             println!("despawn {:?}", entity);
         }
     }
