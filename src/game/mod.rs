@@ -58,7 +58,40 @@ impl PluginGroup for GamePlugins {
 }
 
 #[derive(Component)]
-pub struct X {}
+pub struct Temporary {
+    timer: Timer,
+}
+
+pub enum ObstacleKind {}
+
+#[derive(Component)]
+pub struct Obstacle {}
+
+impl Obstacle {
+    pub fn crate_effect(&self, target: Entity, scale: &Scale) -> impl Bundle {
+        return (
+            BustEffect {
+                target: target,
+                speed: scale.speed * 2.,
+            },
+            Temporary {
+                timer: Timer::new(Duration::from_secs(1), TimerMode::Once),
+            },
+        );
+    }
+}
+
+#[derive(Component)]
+pub struct BustEffect {
+    pub target: Entity,
+    pub speed: f32,
+}
+
+impl BustEffect {
+    pub fn apply(&self, delta: Duration, transform: &mut Transform) {
+        transform.scale *= 1. + (self.speed * delta.as_secs_f32());
+    }
+}
 
 #[derive(Component)]
 pub struct Player {}
@@ -72,6 +105,10 @@ impl Scale {
     pub fn swap(&mut self) {
         self.speed = -self.speed;
     }
+
+    pub fn apply(&self, delta: Duration, transform: &mut Transform) {
+        transform.scale *= 1. + (self.speed * delta.as_secs_f32());
+    }
 }
 
 impl Default for Player {
@@ -84,16 +121,19 @@ pub struct GamePlugin {}
 
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
-        app.add_event::<SpawnXEvent>()
+        app.add_event::<SpawnObstacleEvent>()
             .add_systems(Startup, spawn_world)
             .add_systems(Startup, spawn_camera_system)
             .add_systems(Startup, spawn_player_system)
             .add_systems(Update, player_move_system)
             .add_systems(Update, player_swap_scale_system)
-            .add_systems(Update, scale_system)
-            .add_systems(Update, x_factory_system)
-            .add_systems(Update, spawn_x_system)
-            .add_systems(Update, despawn_out_of_view);
+            .add_systems(Update, apply_scale_system)
+            .add_systems(Update, obstacle_factory_system)
+            .add_systems(Update, spawn_obstacle_system)
+            .add_systems(Update, despawn_out_of_view)
+            .add_systems(Update, hit_obstacle_system)
+            .add_systems(Update, bump_effect_system)
+            .add_systems(Update, temporary_despawn_system);
     }
 }
 
@@ -108,8 +148,8 @@ pub fn spawn_world(mut commands: Commands) {
         gravity: Vec2::ZERO,
         ..default()
     });
-    commands.spawn(XFactoryComponent {
-        timer: Timer::new(Duration::from_secs(1), TimerMode::Repeating),
+    commands.spawn(ObstacleFactoryComponent {
+        timer: Timer::new(Duration::from_secs(3), TimerMode::Repeating),
     });
 }
 
@@ -123,11 +163,11 @@ pub fn spawn_camera_system(mut commands: Commands) {
 }
 
 #[derive(Component)]
-pub struct XFactoryComponent {
+pub struct ObstacleFactoryComponent {
     timer: Timer,
 }
 
-impl XFactoryComponent {
+impl ObstacleFactoryComponent {
     pub fn tick(&mut self, delta: Duration) {
         self.timer.tick(delta);
     }
@@ -136,7 +176,7 @@ impl XFactoryComponent {
         &mut self,
         camera_info: (&Transform, &Velocity),
         player_info: (&Transform),
-        event: &mut EventWriter<SpawnXEvent>,
+        event: &mut EventWriter<SpawnObstacleEvent>,
     ) {
         let (camera_transform, camera_velocity) = camera_info;
         let camera_direction = camera_velocity.linvel.normalize_or_zero();
@@ -144,7 +184,7 @@ impl XFactoryComponent {
         if !self.timer.just_finished() {
             return;
         }
-        event.send(SpawnXEvent {
+        event.send(SpawnObstacleEvent {
             color: Color::RED,
             position: position,
             radius: 32.,
@@ -153,16 +193,16 @@ impl XFactoryComponent {
 }
 
 #[derive(Event, Debug)]
-pub struct SpawnXEvent {
+pub struct SpawnObstacleEvent {
     pub color: Color,
     pub position: Vec3,
     pub radius: f32,
 }
 
-pub fn x_factory_system(
+pub fn obstacle_factory_system(
     time: Res<Time>,
-    mut query: Query<(&mut XFactoryComponent)>,
-    mut events: EventWriter<SpawnXEvent>,
+    mut query: Query<(&mut ObstacleFactoryComponent)>,
+    mut events: EventWriter<SpawnObstacleEvent>,
     camera_query: Query<(&Transform, &Velocity), With<Camera>>,
     player_query: Query<&Transform, With<Player>>,
 ) {
@@ -176,21 +216,23 @@ pub fn x_factory_system(
     }
 }
 
-pub fn spawn_x_system(
+pub fn spawn_obstacle_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut events: EventReader<SpawnXEvent>,
+    mut events: EventReader<SpawnObstacleEvent>,
 ) {
     for event in events.read() {
         let material = materials.add(ColorMaterial::from(event.color));
         let circle = meshes.add(shape::Circle::new(event.radius).into());
         commands
-            .spawn(X {})
+            .spawn(Obstacle {})
             .insert(Collider::ball(event.radius))
             .insert(Sleeping::disabled())
             .insert(RigidBody::Fixed)
+            //.insert(CollidingEntities::default())
             .insert(Sensor::default())
+            .insert(ActiveEvents::COLLISION_EVENTS)
             .insert(MaterialMesh2dBundle {
                 mesh: circle.into(),
                 material: material,
@@ -205,20 +247,26 @@ pub fn spawn_player_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
+    let initial_scale_speed = 0.25;
+    let initial_size = 32.;
     let material = materials.add(ColorMaterial::from(Color::BLUE));
-    let circle = meshes.add(shape::Circle::new(32.).into());
+    let circle = meshes.add(shape::Circle::new(initial_size).into());
     commands
         .spawn(Player::default())
         .insert(create_input_manager())
-        .insert(Scale { speed: 0.25 })
-        .insert(Collider::ball(32.))
+        .insert(Scale {
+            speed: initial_scale_speed,
+        })
+        .insert(Collider::ball(initial_size))
         .insert(Sleeping::disabled())
         .insert(Ccd::enabled())
         .insert(CollidingEntities::default())
-        .insert(RigidBody::KinematicVelocityBased)
+        //.insert(RigidBody::KinematicVelocityBased)
+        .insert(RigidBody::Dynamic)
         .insert(MaterialMesh2dBundle {
             mesh: circle.into(),
             material: material,
+            transform: Transform::from_translation(Vec3::new(0., 0., 1.)),
             ..Default::default()
         });
 }
@@ -247,9 +295,9 @@ pub fn player_swap_scale_system(
     }
 }
 
-pub fn scale_system(time: Res<Time>, mut query: Query<(&Scale, &mut Transform)>) {
+pub fn apply_scale_system(time: Res<Time>, mut query: Query<(&Scale, &mut Transform)>) {
     for (scale, mut transform) in query.iter_mut() {
-        transform.scale *= 1. + (scale.speed * time.delta_seconds());
+        scale.apply(time.delta(), &mut transform);
     }
 }
 
@@ -261,6 +309,50 @@ pub fn despawn_out_of_view(
         if !view_visibility.get() {
             commands.entity(entity).despawn_recursive();
             println!("despawn {:?}", entity);
+        }
+    }
+}
+
+pub fn hit_obstacle_system(
+    mut commands: Commands,
+    mut player_query: Query<(Entity, &CollidingEntities, &Scale), With<Player>>,
+    obstacle_query: Query<(Entity, &Obstacle)>,
+) {
+    for player_info in player_query.iter_mut() {
+        let (player_entity, colliding_entities, scale) = player_info;
+        for colliding_entity in colliding_entities.iter() {
+            println!("{:?}", colliding_entity);
+            if let Ok(obstacle_info) = obstacle_query.get(colliding_entity) {
+                let (obstacle_entity, obstacle) = obstacle_info;
+                let effect_bundle = obstacle.crate_effect(player_entity, scale);
+                commands.spawn(effect_bundle);
+                commands.entity(obstacle_entity).despawn_recursive();
+            }
+        }
+    }
+}
+
+pub fn bump_effect_system(
+    time: Res<Time>,
+    mut effect_query: Query<&BustEffect>,
+    mut target_query: Query<&mut Transform>,
+) {
+    for effect in effect_query.iter_mut() {
+        if let Ok(mut transform) = target_query.get_mut(effect.target) {
+            effect.apply(time.delta(), &mut transform);
+        }
+    }
+}
+
+pub fn temporary_despawn_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut query: Query<(Entity, &mut Temporary)>,
+) {
+    for (entity, mut temporary) in query.iter_mut() {
+        temporary.timer.tick(time.delta());
+        if temporary.timer.finished() {
+            commands.entity(entity).despawn_recursive();
         }
     }
 }
