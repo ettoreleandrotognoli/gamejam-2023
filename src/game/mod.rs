@@ -115,7 +115,7 @@ impl Obstacle {
                 commands.spawn((
                     BustEffect {
                         target,
-                        speed: (scale.speed * 2.) * if dir { 1. } else { -1. },
+                        speed: scale.speed * if dir { 2. } else { -3. },
                     },
                     Temporary {
                         timer: Timer::from_seconds(0.5, TimerMode::Once),
@@ -230,7 +230,7 @@ impl ObstacleFactoryComponent {
         if !self.timer.just_finished() {
             return;
         }
-        let kind = ObstacleKind::Bust(true);
+        let kind = ObstacleKind::Bust(false);
         event.send(SpawnObstacleEvent {
             color: kind.get_color(),
             position: position,
@@ -272,10 +272,9 @@ pub fn spawn_obstacle_system(
     mut events: EventReader<SpawnObstacleEvent>,
 ) {
     for event in events.read() {
-        let kind = ObstacleKind::Bust(true);
         let material = materials.add(ColorMaterial::from(event.color));
         let circle = meshes.add(shape::Circle::new(event.radius).into());
-        let mut obstacle_commands = commands.spawn(Obstacle { kind });
+        let mut obstacle_commands = commands.spawn(Obstacle { kind: event.kind });
         obstacle_commands
             .insert(Collider::ball(event.radius))
             .insert(Sleeping::disabled())
@@ -290,7 +289,7 @@ pub fn spawn_obstacle_system(
                 transform: Transform::from_translation(event.position),
                 ..Default::default()
             });
-        kind.add_bundle(&mut obstacle_commands);
+        event.kind.add_bundle(&mut obstacle_commands);
     }
 }
 
