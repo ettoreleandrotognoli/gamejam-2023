@@ -1,11 +1,11 @@
-use std::time::Duration;
-
 use bevy::{
     app::PluginGroupBuilder, ecs::system::EntityCommands, prelude::*, sprite::MaterialMesh2dBundle,
-    transform::commands,
+    transform::commands, window::WindowResolution,
 };
 use bevy_rapier2d::prelude::*;
+use bevy_turborand::prelude::*;
 use leafwing_input_manager::prelude::*;
+use std::{f32::consts::PI, time::Duration};
 
 const ORIGINAL_RADIUS: f32 = 32.;
 pub struct GamePlugins;
@@ -64,7 +64,8 @@ impl PluginGroup for GamePlugins {
         group = group
             .add(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(1.0))
             .add(GamePlugin::default())
-            .add(InputManagerPlugin::<PlayerAction>::default());
+            .add(InputManagerPlugin::<PlayerAction>::default())
+            .add(RngPlugin::default());
         #[cfg(debug_assertions)]
         {
             group = group.add(RapierDebugRenderPlugin::default());
@@ -193,7 +194,7 @@ impl Plugin for GamePlugin {
             .add_systems(Update, spawn_obstacle_system)
             .add_systems(Update, despawn_out_of_view)
             .add_systems(Update, hit_obstacle_system)
-            .add_systems(Update, bump_effect_system)
+            .add_systems(Update, bust_effect_system)
             .add_systems(Update, temporary_despawn_system);
     }
 }
@@ -204,14 +205,17 @@ impl Default for GamePlugin {
     }
 }
 
-pub fn spawn_world(mut commands: Commands) {
+pub fn spawn_world(mut commands: Commands, mut global_rng: ResMut<GlobalRng>) {
     commands.insert_resource(RapierConfiguration {
         gravity: Vec2::ZERO,
         ..default()
     });
-    commands.spawn(ObstacleFactoryComponent {
-        timer: Timer::new(Duration::from_secs(3), TimerMode::Repeating),
-    });
+    commands.spawn((
+        ObstacleFactoryComponent {
+            timer: Timer::new(Duration::from_secs(1), TimerMode::Repeating),
+        },
+        RngComponent::from(&mut global_rng),
+    ));
 }
 
 pub fn spawn_camera_system(mut commands: Commands) {
@@ -220,7 +224,7 @@ pub fn spawn_camera_system(mut commands: Commands) {
         .insert(Sleeping::disabled())
         .insert(Ccd::enabled())
         .insert(RigidBody::KinematicVelocityBased)
-        .insert(Velocity::linear(Vec2::new(0., 50.)));
+        .insert(Velocity::linear(Vec2::new(0., 80.)));
 }
 
 #[derive(Component)]
@@ -235,20 +239,29 @@ impl ObstacleFactoryComponent {
 
     pub fn create(
         &mut self,
+        random: &mut RngComponent,
         camera_info: (&Transform, &Velocity),
         player_info: (&Transform),
         event: &mut EventWriter<SpawnObstacleEvent>,
     ) {
-        let (camera_transform, camera_velocity) = camera_info;
-        let camera_direction = camera_velocity.linvel.normalize_or_zero();
-        let position = camera_transform.translation + (camera_direction * 100.).extend(0.);
         if !self.timer.just_finished() {
             return;
         }
-        let kind = ObstacleKind::ScaleBust(false);
+        let (camera_transform, camera_velocity) = camera_info;
+        let camera_direction = camera_velocity.linvel.normalize_or_zero();
+        let obstacle_direction = camera_direction.rotate(Vec2::from_angle(PI / 2.));
+        let obstacle_middle =
+            camera_transform.translation.truncate() + (camera_direction * 1080. / 2.);
+        let position = obstacle_middle + obstacle_direction * random.f32_normalized() * 720. / 2.;
+        let kind = match random.u8(0..=2) {
+            0 => ObstacleKind::ScaleBust(random.bool()),
+            1 => ObstacleKind::ScaleBust(random.bool()),
+            2 => ObstacleKind::Block,
+            _ => ObstacleKind::Block,
+        };
         event.send(SpawnObstacleEvent {
             color: kind.get_color(),
-            position: position,
+            position: position.extend(0.),
             radius: ORIGINAL_RADIUS,
             kind,
         })
@@ -265,16 +278,16 @@ pub struct SpawnObstacleEvent {
 
 pub fn obstacle_factory_system(
     time: Res<Time>,
-    mut query: Query<(&mut ObstacleFactoryComponent)>,
+    mut query: Query<(&mut ObstacleFactoryComponent, &mut RngComponent)>,
     mut events: EventWriter<SpawnObstacleEvent>,
     camera_query: Query<(&Transform, &Velocity), With<Camera>>,
     player_query: Query<&Transform, With<Player>>,
 ) {
     if let Ok(camera_info) = camera_query.get_single() {
         if let Ok(player_info) = player_query.get_single() {
-            for (mut factory) in query.iter_mut() {
+            for (mut factory, mut random) in query.iter_mut() {
                 factory.tick(time.delta());
-                factory.create(camera_info, player_info, &mut events);
+                factory.create(&mut random, camera_info, player_info, &mut events);
             }
         }
     }
@@ -297,7 +310,7 @@ pub fn spawn_obstacle_system(
             //.insert(CollidingEntities::default())
             //.insert(Sensor::default())
             .insert(ActiveEvents::all())
-            .insert(ActiveHooks::all())
+            //.insert(ActiveHooks::all())
             .insert(MaterialMesh2dBundle {
                 mesh: circle.into(),
                 material: material,
@@ -386,10 +399,22 @@ pub fn apply_scale_system(time: Res<Time>, mut query: Query<(&Scale, &mut Transf
 
 pub fn despawn_out_of_view(
     mut commands: Commands,
-    query: Query<(Entity, &ViewVisibility), Without<Player>>,
+    camera_query: Query<(&Transform, &Velocity), With<Camera>>,
+    query: Query<(Entity, &ViewVisibility, &Transform), Without<Player>>,
 ) {
-    for (entity, view_visibility) in query.iter() {
-        if !view_visibility.get() {
+    let camera_info = camera_query.get_single().unwrap();
+    let camera_position = camera_info.0.translation;
+    let camera_dir = camera_info.1.linvel.normalize_or_zero();
+    for (entity, view_visibility, transform) in query.iter() {
+        if view_visibility.get() {
+            continue;
+        }
+        let angle = (transform.translation - camera_position)
+            .truncate()
+            .normalize_or_zero()
+            .angle_between(camera_dir);
+        if angle >= PI {
+            println!("despawn {:?}", entity);
             commands.entity(entity).despawn_recursive();
         }
     }
@@ -428,7 +453,7 @@ pub fn hit_obstacle_system(
     }
 }
 
-pub fn bump_effect_system(
+pub fn bust_effect_system(
     time: Res<Time>,
     mut effect_query: Query<&BustEffect>,
     mut target_query: Query<&mut Transform>,
