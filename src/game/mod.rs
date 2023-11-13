@@ -60,6 +60,8 @@ fn create_input_map() -> InputMap<PlayerAction> {
     input_map.insert(KeyCode::Space, PlayerAction::SwapScale);
     input_map.insert(KeyCode::Escape, PlayerAction::Pause);
     input_map.insert(KeyCode::Escape, PlayerAction::Start);
+    input_map.insert(KeyCode::Return, PlayerAction::Pause);
+    input_map.insert(KeyCode::Return, PlayerAction::Start);
     insert_gamepad(&mut input_map);
     input_map
 }
