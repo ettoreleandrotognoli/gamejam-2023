@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use bevy::{app::PluginGroupBuilder, prelude::*, sprite::MaterialMesh2dBundle};
+use bevy::{
+    app::PluginGroupBuilder, ecs::system::EntityCommands, prelude::*, sprite::MaterialMesh2dBundle,
+    transform::commands,
+};
 use bevy_rapier2d::prelude::*;
 use leafwing_input_manager::prelude::*;
 pub struct GamePlugins;
@@ -62,22 +65,65 @@ pub struct Temporary {
     timer: Timer,
 }
 
-pub enum ObstacleKind {}
+#[derive(Component)]
+pub struct MaxSpeed {
+    linear: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum ObstacleKind {
+    Bust(bool),
+    Block,
+}
+
+impl ObstacleKind {
+    pub fn add_bundle<'w, 's, 'a>(&self, entity_commands: &mut EntityCommands<'w, 's, 'a>) {
+        match self {
+            Self::Block => (),
+            Self::Bust(_) => {
+                entity_commands.insert((
+                    CollisionGroups::new(Group::all(), Group::all()),
+                    SolverGroups::new(Group::all(), Group::NONE),
+                ));
+            }
+        }
+    }
+
+    pub fn get_color(&self) -> Color {
+        match self {
+            Self::Block => Color::GRAY,
+            Self::Bust(dir) => {
+                if *dir {
+                    Color::BLUE
+                } else {
+                    Color::RED
+                }
+            }
+        }
+    }
+}
 
 #[derive(Component)]
-pub struct Obstacle {}
+pub struct Obstacle {
+    kind: ObstacleKind,
+}
 
 impl Obstacle {
-    pub fn crate_effect(&self, target: Entity, scale: &Scale) -> impl Bundle {
-        return (
-            BustEffect {
-                target: target,
-                speed: scale.speed * 2.,
-            },
-            Temporary {
-                timer: Timer::new(Duration::from_secs(1), TimerMode::Once),
-            },
-        );
+    pub fn create_effect(&self, commands: &mut Commands, target: Entity, scale: &Scale) {
+        match self.kind {
+            ObstacleKind::Bust(dir) => {
+                commands.spawn((
+                    BustEffect {
+                        target,
+                        speed: (scale.speed * 2.) * if dir { 1. } else { -1. },
+                    },
+                    Temporary {
+                        timer: Timer::from_seconds(0.5, TimerMode::Once),
+                    },
+                ));
+            }
+            ObstacleKind::Block => (),
+        };
     }
 }
 
@@ -184,10 +230,12 @@ impl ObstacleFactoryComponent {
         if !self.timer.just_finished() {
             return;
         }
+        let kind = ObstacleKind::Bust(true);
         event.send(SpawnObstacleEvent {
-            color: Color::RED,
+            color: kind.get_color(),
             position: position,
             radius: 32.,
+            kind,
         })
     }
 }
@@ -197,6 +245,7 @@ pub struct SpawnObstacleEvent {
     pub color: Color,
     pub position: Vec3,
     pub radius: f32,
+    pub kind: ObstacleKind,
 }
 
 pub fn obstacle_factory_system(
@@ -223,22 +272,25 @@ pub fn spawn_obstacle_system(
     mut events: EventReader<SpawnObstacleEvent>,
 ) {
     for event in events.read() {
+        let kind = ObstacleKind::Bust(true);
         let material = materials.add(ColorMaterial::from(event.color));
         let circle = meshes.add(shape::Circle::new(event.radius).into());
-        commands
-            .spawn(Obstacle {})
+        let mut obstacle_commands = commands.spawn(Obstacle { kind });
+        obstacle_commands
             .insert(Collider::ball(event.radius))
             .insert(Sleeping::disabled())
             .insert(RigidBody::Fixed)
             //.insert(CollidingEntities::default())
-            .insert(Sensor::default())
-            .insert(ActiveEvents::COLLISION_EVENTS)
+            //.insert(Sensor::default())
+            .insert(ActiveEvents::all())
+            .insert(ActiveHooks::all())
             .insert(MaterialMesh2dBundle {
                 mesh: circle.into(),
                 material: material,
                 transform: Transform::from_translation(event.position),
                 ..Default::default()
             });
+        kind.add_bundle(&mut obstacle_commands);
     }
 }
 
@@ -247,12 +299,13 @@ pub fn spawn_player_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    let initial_scale_speed = 0.25;
+    let initial_scale_speed = 0.5;
     let initial_size = 32.;
-    let material = materials.add(ColorMaterial::from(Color::BLUE));
+    let material = materials.add(ColorMaterial::from(Color::CYAN));
     let circle = meshes.add(shape::Circle::new(initial_size).into());
     commands
         .spawn(Player::default())
+        .insert(MaxSpeed { linear: 200. })
         .insert(create_input_manager())
         .insert(Scale {
             speed: initial_scale_speed,
@@ -261,6 +314,7 @@ pub fn spawn_player_system(
         .insert(Sleeping::disabled())
         .insert(Ccd::enabled())
         .insert(CollidingEntities::default())
+        .insert(ActiveHooks::FILTER_CONTACT_PAIRS)
         //.insert(RigidBody::KinematicVelocityBased)
         .insert(RigidBody::Dynamic)
         .insert(MaterialMesh2dBundle {
@@ -273,10 +327,10 @@ pub fn spawn_player_system(
 
 pub fn player_move_system(
     mut commands: Commands,
-    query: Query<(Entity, &ActionState<PlayerAction>), With<Player>>,
+    query: Query<(Entity, &ActionState<PlayerAction>, &MaxSpeed), With<Player>>,
 ) {
-    let speed = 100.;
-    for (entity, action_state) in query.iter() {
+    for (entity, action_state, max_speed) in query.iter() {
+        let speed = max_speed.linear;
         if let Some(move_axis_pair) = action_state.axis_pair(PlayerAction::Move) {
             let direction = move_axis_pair.xy();
             let speed = direction.normalize_or_zero() * speed;
@@ -308,12 +362,12 @@ pub fn despawn_out_of_view(
     for (entity, view_visibility) in query.iter() {
         if !view_visibility.get() {
             commands.entity(entity).despawn_recursive();
-            println!("despawn {:?}", entity);
         }
     }
 }
 
 pub fn hit_obstacle_system(
+    rapier_context: Res<RapierContext>,
     mut commands: Commands,
     mut player_query: Query<(Entity, &CollidingEntities, &Scale), With<Player>>,
     obstacle_query: Query<(Entity, &Obstacle)>,
@@ -321,12 +375,19 @@ pub fn hit_obstacle_system(
     for player_info in player_query.iter_mut() {
         let (player_entity, colliding_entities, scale) = player_info;
         for colliding_entity in colliding_entities.iter() {
-            println!("{:?}", colliding_entity);
             if let Ok(obstacle_info) = obstacle_query.get(colliding_entity) {
                 let (obstacle_entity, obstacle) = obstacle_info;
-                let effect_bundle = obstacle.crate_effect(player_entity, scale);
-                commands.spawn(effect_bundle);
-                commands.entity(obstacle_entity).despawn_recursive();
+                let intersection = rapier_context.contact_pair(colliding_entity, player_entity);
+                let penetration = intersection
+                    .unwrap()
+                    .find_deepest_contact()
+                    .unwrap()
+                    .1
+                    .dist();
+                if penetration.abs() >= 0.5 {
+                    obstacle.create_effect(&mut commands, player_entity, scale);
+                    commands.entity(obstacle_entity).despawn_recursive();
+                }
             }
         }
     }
