@@ -6,11 +6,18 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-bevy = { version = "0.12", features = ["dynamic_linking", "wayland"] }
+bevy = { version = "0.12" }
 bevy_rapier2d = "0.23.0"
 bevy_turborand = "0.7.0"
 leafwing-input-manager = "0.11.1"
 
+
+[target.'cfg(unix)'.dependencies]
+bevy = { version = "0.12", features = ["dynamic_linking", "wayland"] }
+
+[target.'cfg(target_arch="wasm32")'.dependencies]
+bevy = { version = "0.12" }
+wasm-bindgen = "*"
 
 # Enable a small amount of optimization in debug mode
 [profile.dev]

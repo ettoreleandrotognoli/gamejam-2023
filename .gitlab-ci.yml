@@ -1,0 +1,81 @@
+stages:
+  - build
+  - test
+  - release
+  - deploy
+
+.rust_cache: &rust_cache
+  key:
+    files:
+      - Cargo.lock
+  paths:
+    - .cargo
+    - target/
+  policy: pull-push
+
+.rust_job: &rust_job
+  cache:
+    <<: *rust_cache
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  image: registry.gitlab.com/ettotog/rust-bevy
+
+build:
+  <<: *rust_job
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  stage: build
+  script:
+    - cargo build
+    - cargo test --verbose
+
+build-web:
+  <<: *rust_job
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  stage: release
+  image:
+    name: registry.gitlab.com/ettotog/rust-wasm
+    entrypoint: [""]
+  script:
+    - /root/entrypoint.sh
+  artifacts:
+    paths:
+      - public/
+
+build-linux:
+  <<: *rust_job
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  stage: release
+  script:
+    - cargo build --release
+  artifacts:
+    paths:
+      - target/release/
+    exclude:
+      - target/release/build/**/*
+      - target/release/deps/**/*
+      - target/release/incremental/**/*
+
+build-docs:
+  <<: *rust_job
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  stage: release
+  script:
+    - cargo doc --no-deps --document-private-items
+  artifacts:
+    paths:
+      - target/doc/
+
+pages:
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  stage: deploy
+  script:
+    - echo "Deploying pages..."
+    - cp -r ./target/doc/ ./public/doc/
+  artifacts:
+    paths:
+      - public/
