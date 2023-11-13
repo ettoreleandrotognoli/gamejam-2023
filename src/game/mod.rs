@@ -6,35 +6,48 @@ use bevy::{
 };
 use bevy_rapier2d::prelude::*;
 use leafwing_input_manager::prelude::*;
+
+const ORIGINAL_RADIUS: f32 = 32.;
 pub struct GamePlugins;
+
+#[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
+pub enum GameState {
+    #[default]
+    Running,
+    Pause,
+}
 
 #[derive(Actionlike, PartialEq, Eq, Clone, Copy, Hash, Debug, Reflect)]
 pub enum PlayerAction {
     Move,
     SwapScale,
+    Pause,
+}
+
+fn left_keyboard_dap() -> VirtualDPad {
+    VirtualDPad {
+        up: KeyCode::W.into(),
+        down: KeyCode::S.into(),
+        left: KeyCode::A.into(),
+        right: KeyCode::D.into(),
+    }
+}
+
+fn right_keyboard_dap() -> VirtualDPad {
+    VirtualDPad {
+        up: KeyCode::Up.into(),
+        down: KeyCode::Down.into(),
+        left: KeyCode::Left.into(),
+        right: KeyCode::Right.into(),
+    }
 }
 
 fn create_input_map() -> InputMap<PlayerAction> {
     let mut input_map = InputMap::default();
-    input_map.insert(
-        VirtualDPad {
-            up: KeyCode::W.into(),
-            down: KeyCode::S.into(),
-            left: KeyCode::A.into(),
-            right: KeyCode::D.into(),
-        },
-        PlayerAction::Move,
-    );
-    input_map.insert(
-        VirtualDPad {
-            up: KeyCode::Up.into(),
-            down: KeyCode::Down.into(),
-            left: KeyCode::Left.into(),
-            right: KeyCode::Right.into(),
-        },
-        PlayerAction::Move,
-    );
+    input_map.insert(left_keyboard_dap(), PlayerAction::Move);
+    input_map.insert(right_keyboard_dap(), PlayerAction::Move);
     input_map.insert(KeyCode::Space, PlayerAction::SwapScale);
+    input_map.insert(KeyCode::Escape, PlayerAction::Pause);
     input_map
 }
 
@@ -49,7 +62,7 @@ impl PluginGroup for GamePlugins {
     fn build(self) -> PluginGroupBuilder {
         let mut group = PluginGroupBuilder::start::<Self>();
         group = group
-            .add(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0))
+            .add(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(1.0))
             .add(GamePlugin::default())
             .add(InputManagerPlugin::<PlayerAction>::default());
         #[cfg(debug_assertions)]
@@ -72,7 +85,7 @@ pub struct MaxSpeed {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ObstacleKind {
-    Bust(bool),
+    ScaleBust(bool),
     Block,
 }
 
@@ -80,7 +93,7 @@ impl ObstacleKind {
     pub fn add_bundle<'w, 's, 'a>(&self, entity_commands: &mut EntityCommands<'w, 's, 'a>) {
         match self {
             Self::Block => (),
-            Self::Bust(_) => {
+            Self::ScaleBust(_) => {
                 entity_commands.insert((
                     CollisionGroups::new(Group::all(), Group::all()),
                     SolverGroups::new(Group::all(), Group::NONE),
@@ -92,7 +105,7 @@ impl ObstacleKind {
     pub fn get_color(&self) -> Color {
         match self {
             Self::Block => Color::GRAY,
-            Self::Bust(dir) => {
+            Self::ScaleBust(dir) => {
                 if *dir {
                     Color::BLUE
                 } else {
@@ -111,7 +124,7 @@ pub struct Obstacle {
 impl Obstacle {
     pub fn create_effect(&self, commands: &mut Commands, target: Entity, scale: &Scale) {
         match self.kind {
-            ObstacleKind::Bust(dir) => {
+            ObstacleKind::ScaleBust(dir) => {
                 commands.spawn((
                     BustEffect {
                         target,
@@ -168,10 +181,12 @@ pub struct GamePlugin {}
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<SpawnObstacleEvent>()
+            .add_state::<GameState>()
             .add_systems(Startup, spawn_world)
             .add_systems(Startup, spawn_camera_system)
             .add_systems(Startup, spawn_player_system)
             .add_systems(Update, player_move_system)
+            .add_systems(Update, player_pause_system)
             .add_systems(Update, player_swap_scale_system)
             .add_systems(Update, apply_scale_system)
             .add_systems(Update, obstacle_factory_system)
@@ -230,11 +245,11 @@ impl ObstacleFactoryComponent {
         if !self.timer.just_finished() {
             return;
         }
-        let kind = ObstacleKind::Bust(false);
+        let kind = ObstacleKind::ScaleBust(false);
         event.send(SpawnObstacleEvent {
             color: kind.get_color(),
             position: position,
-            radius: 32.,
+            radius: ORIGINAL_RADIUS,
             kind,
         })
     }
@@ -299,7 +314,7 @@ pub fn spawn_player_system(
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
     let initial_scale_speed = 0.5;
-    let initial_size = 32.;
+    let initial_size = ORIGINAL_RADIUS;
     let material = materials.add(ColorMaterial::from(Color::CYAN));
     let circle = meshes.add(shape::Circle::new(initial_size).into());
     commands
@@ -338,6 +353,21 @@ pub fn player_move_system(
     }
 }
 
+pub fn player_pause_system(
+    mut time: ResMut<Time<Virtual>>,
+    query: Query<(Entity, &ActionState<PlayerAction>), With<Player>>,
+) {
+    for (_, action_state) in query.iter() {
+        if action_state.just_pressed(PlayerAction::Pause) {
+            if time.is_paused() {
+                time.unpause();
+            } else {
+                time.pause();
+            }
+        }
+    }
+}
+
 pub fn player_swap_scale_system(
     mut query: Query<(&mut Scale, &ActionState<PlayerAction>), With<Player>>,
 ) {
@@ -368,24 +398,30 @@ pub fn despawn_out_of_view(
 pub fn hit_obstacle_system(
     rapier_context: Res<RapierContext>,
     mut commands: Commands,
-    mut player_query: Query<(Entity, &CollidingEntities, &Scale), With<Player>>,
-    obstacle_query: Query<(Entity, &Obstacle)>,
+    mut player_query: Query<(Entity, &CollidingEntities, &Scale, &Transform), With<Player>>,
+    obstacle_query: Query<(Entity, &Obstacle, &Transform)>,
 ) {
     for player_info in player_query.iter_mut() {
-        let (player_entity, colliding_entities, scale) = player_info;
+        let (player_entity, colliding_entities, scale, player_transform) = player_info;
+        let player_length = player_transform.scale.x;
         for colliding_entity in colliding_entities.iter() {
             if let Ok(obstacle_info) = obstacle_query.get(colliding_entity) {
-                let (obstacle_entity, obstacle) = obstacle_info;
+                let (obstacle_entity, obstacle, obstacle_transform) = obstacle_info;
+                let obstacle_length = obstacle_transform.scale.x;
                 let intersection = rapier_context.contact_pair(colliding_entity, player_entity);
-                let penetration = intersection
-                    .unwrap()
-                    .find_deepest_contact()
-                    .unwrap()
-                    .1
-                    .dist();
-                if penetration.abs() >= 0.5 {
-                    obstacle.create_effect(&mut commands, player_entity, scale);
-                    commands.entity(obstacle_entity).despawn_recursive();
+                let contact_pair_view = intersection.unwrap();
+                let deepest_contact = contact_pair_view.find_deepest_contact().unwrap();
+                let penetration = deepest_contact.1.dist();
+                let normal = deepest_contact.0.normal();
+                if player_length >= obstacle_length {
+                    if penetration.abs() >= ORIGINAL_RADIUS * 2. * obstacle_length {
+                        obstacle.create_effect(&mut commands, player_entity, scale);
+                        commands.entity(obstacle_entity).despawn_recursive();
+                    }
+                } else {
+                    if penetration.abs() >= ORIGINAL_RADIUS * 2. * player_length {
+                        println!("kill player");
+                    }
                 }
             }
         }
