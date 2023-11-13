@@ -1,6 +1,5 @@
 use bevy::{
     app::PluginGroupBuilder, ecs::system::EntityCommands, prelude::*, sprite::MaterialMesh2dBundle,
-    transform::commands, window::WindowResolution,
 };
 use bevy_rapier2d::prelude::*;
 use bevy_turborand::prelude::*;
@@ -13,8 +12,10 @@ pub struct GamePlugins;
 #[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 pub enum GameState {
     #[default]
+    Startup,
     Running,
     Pause,
+    Over,
 }
 
 #[derive(Actionlike, PartialEq, Eq, Clone, Copy, Hash, Debug, Reflect)]
@@ -22,6 +23,7 @@ pub enum PlayerAction {
     Move,
     SwapScale,
     Pause,
+    Start,
 }
 
 fn left_keyboard_dap() -> VirtualDPad {
@@ -42,19 +44,32 @@ fn right_keyboard_dap() -> VirtualDPad {
     }
 }
 
+fn insert_gamepad(input_map: &mut InputMap<PlayerAction>) {
+    input_map.insert(DualAxis::left_stick(), PlayerAction::Move);
+    input_map.insert_multiple([
+        (GamepadButtonType::South, PlayerAction::SwapScale),
+        (GamepadButtonType::Start, PlayerAction::Pause),
+        (GamepadButtonType::Start, PlayerAction::Start),
+    ]);
+}
+
 fn create_input_map() -> InputMap<PlayerAction> {
     let mut input_map = InputMap::default();
     input_map.insert(left_keyboard_dap(), PlayerAction::Move);
     input_map.insert(right_keyboard_dap(), PlayerAction::Move);
     input_map.insert(KeyCode::Space, PlayerAction::SwapScale);
     input_map.insert(KeyCode::Escape, PlayerAction::Pause);
+    input_map.insert(KeyCode::Escape, PlayerAction::Start);
+    insert_gamepad(&mut input_map);
     input_map
 }
 
 fn create_input_manager() -> InputManagerBundle<PlayerAction> {
+    let mut input_map = create_input_map();
+    input_map.set_gamepad(Gamepad { id: 0 });
     InputManagerBundle {
         action_state: ActionState::default(),
-        input_map: create_input_map(),
+        input_map: input_map,
     }
 }
 
@@ -74,6 +89,12 @@ impl PluginGroup for GamePlugins {
     }
 }
 
+#[derive(Event)]
+pub enum GameEvent {
+    Start,
+    GameOver,
+}
+
 #[derive(Component)]
 pub struct Temporary {
     timer: Timer,
@@ -88,6 +109,8 @@ pub struct MaxSpeed {
 pub enum ObstacleKind {
     ScaleBust(bool),
     Block,
+    Ice,
+    Poison,
 }
 
 impl ObstacleKind {
@@ -95,6 +118,18 @@ impl ObstacleKind {
         match self {
             Self::Block => (),
             Self::ScaleBust(_) => {
+                entity_commands.insert((
+                    CollisionGroups::new(Group::all(), Group::all()),
+                    SolverGroups::new(Group::all(), Group::NONE),
+                ));
+            }
+            Self::Ice => {
+                entity_commands.insert((
+                    CollisionGroups::new(Group::all(), Group::all()),
+                    SolverGroups::new(Group::all(), Group::NONE),
+                ));
+            }
+            Self::Poison => {
                 entity_commands.insert((
                     CollisionGroups::new(Group::all(), Group::all()),
                     SolverGroups::new(Group::all(), Group::NONE),
@@ -113,6 +148,8 @@ impl ObstacleKind {
                     Color::RED
                 }
             }
+            Self::Ice => Color::WHITE,
+            Self::Poison => Color::GREEN,
         }
     }
 }
@@ -137,6 +174,18 @@ impl Obstacle {
                 ));
             }
             ObstacleKind::Block => (),
+            ObstacleKind::Ice => {
+                commands.spawn((
+                    FrozenEffect { target },
+                    Temporary {
+                        timer: Timer::from_seconds(0.5, TimerMode::Once),
+                    },
+                ));
+                commands.entity(target).insert(Velocity::zero());
+            }
+            ObstacleKind::Poison => {
+                commands.spawn(Destroy { target });
+            }
         };
     }
 }
@@ -154,7 +203,42 @@ impl BustEffect {
 }
 
 #[derive(Component)]
+pub struct FrozenEffect {
+    target: Entity,
+}
+
+#[derive(Component)]
+pub struct Destroy {
+    target: Entity,
+}
+
+#[derive(Component)]
 pub struct Player {}
+
+#[derive(Component)]
+pub struct TimeScore {
+    elapsed_time: Duration,
+}
+
+impl Default for TimeScore {
+    fn default() -> Self {
+        Self {
+            elapsed_time: Duration::ZERO,
+        }
+    }
+}
+
+impl TimeScore {
+    pub fn tick(&mut self, delta: Duration) {
+        self.elapsed_time += delta;
+    }
+
+    pub fn to_string(&self) -> String {
+        let minutes = self.elapsed_time.as_secs() / 60;
+        let seconds = self.elapsed_time.as_secs() % 60;
+        format!("{:02}:{:02}", minutes, seconds)
+    }
+}
 
 #[derive(Component)]
 pub struct Scale {
@@ -182,20 +266,43 @@ pub struct GamePlugin {}
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<SpawnObstacleEvent>()
+            .add_event::<GameEvent>()
             .add_state::<GameState>()
-            .add_systems(Startup, spawn_world)
             .add_systems(Startup, spawn_camera_system)
-            .add_systems(Startup, spawn_player_system)
-            .add_systems(Update, player_move_system)
-            .add_systems(Update, player_pause_system)
-            .add_systems(Update, player_swap_scale_system)
-            .add_systems(Update, apply_scale_system)
-            .add_systems(Update, obstacle_factory_system)
-            .add_systems(Update, spawn_obstacle_system)
-            .add_systems(Update, despawn_out_of_view)
-            .add_systems(Update, hit_obstacle_system)
-            .add_systems(Update, bust_effect_system)
-            .add_systems(Update, temporary_despawn_system);
+            .add_systems(
+                OnEnter(GameState::Startup),
+                (spawn_world, spawn_player_system, reset_camera_system),
+            )
+            .add_systems(
+                Update,
+                player_pause_system.run_if(in_state(GameState::Running)),
+            )
+            .add_systems(
+                Update,
+                player_unpause_system.run_if(in_state(GameState::Pause)),
+            )
+            .add_systems(
+                Update,
+                player_restart_system.run_if(in_state(GameState::Over)),
+            )
+            .add_systems(
+                Update,
+                (
+                    player_move_system,
+                    player_swap_scale_system,
+                    apply_scale_system,
+                    obstacle_factory_system,
+                    spawn_obstacle_system,
+                    despawn_out_of_view,
+                    hit_obstacle_system,
+                    bust_effect_system,
+                    temporary_despawn_system,
+                    time_score_system,
+                    destroy_system,
+                )
+                    .run_if(in_state(GameState::Running)),
+            )
+            .add_systems(Update, game_event_system);
     }
 }
 
@@ -205,7 +312,20 @@ impl Default for GamePlugin {
     }
 }
 
-pub fn spawn_world(mut commands: Commands, mut global_rng: ResMut<GlobalRng>) {
+pub fn reset_camera_system(mut query: Query<(&mut Transform), With<Camera>>) {
+    for mut transform in query.iter_mut() {
+        transform.translation = Vec3::ZERO;
+    }
+}
+
+pub fn spawn_world(
+    mut commands: Commands,
+    mut global_rng: ResMut<GlobalRng>,
+    mut state: ResMut<NextState<GameState>>,
+    mut time: ResMut<Time<Virtual>>,
+) {
+    time.unpause();
+    state.set(GameState::Running);
     commands.insert_resource(RapierConfiguration {
         gravity: Vec2::ZERO,
         ..default()
@@ -216,6 +336,24 @@ pub fn spawn_world(mut commands: Commands, mut global_rng: ResMut<GlobalRng>) {
         },
         RngComponent::from(&mut global_rng),
     ));
+    commands
+        .spawn(
+            TextBundle::from_section(
+                "??:??",
+                TextStyle {
+                    font_size: 64.,
+                    ..default()
+                },
+            )
+            .with_text_alignment(TextAlignment::Center)
+            .with_style(Style {
+                position_type: PositionType::Absolute,
+                top: Val::Px(0.),
+                right: Val::Percent(1.),
+                ..default()
+            }),
+        )
+        .insert(TimeScore::default());
 }
 
 pub fn spawn_camera_system(mut commands: Commands) {
@@ -252,19 +390,24 @@ impl ObstacleFactoryComponent {
         let obstacle_direction = camera_direction.rotate(Vec2::from_angle(PI / 2.));
         let obstacle_middle =
             camera_transform.translation.truncate() + (camera_direction * 1080. / 2.);
-        let position = obstacle_middle + obstacle_direction * random.f32_normalized() * 720. / 2.;
-        let kind = match random.u8(0..=2) {
-            0 => ObstacleKind::ScaleBust(random.bool()),
-            1 => ObstacleKind::ScaleBust(random.bool()),
-            2 => ObstacleKind::Block,
-            _ => ObstacleKind::Block,
-        };
-        event.send(SpawnObstacleEvent {
-            color: kind.get_color(),
-            position: position.extend(0.),
-            radius: ORIGINAL_RADIUS,
-            kind,
-        })
+        for _ in 0..2 {
+            let position =
+                obstacle_middle + obstacle_direction * random.f32_normalized() * 720. / 2.;
+            let kind = match random.u8(0..=4) {
+                0 => ObstacleKind::ScaleBust(random.bool()),
+                1 => ObstacleKind::ScaleBust(random.bool()),
+                2 => ObstacleKind::Block,
+                3 => ObstacleKind::Ice,
+                4 => ObstacleKind::Poison,
+                _ => ObstacleKind::Block,
+            };
+            event.send(SpawnObstacleEvent {
+                color: kind.get_color(),
+                position: position.extend(0.),
+                radius: ORIGINAL_RADIUS,
+                kind,
+            })
+        }
     }
 }
 
@@ -355,8 +498,13 @@ pub fn spawn_player_system(
 pub fn player_move_system(
     mut commands: Commands,
     query: Query<(Entity, &ActionState<PlayerAction>, &MaxSpeed), With<Player>>,
+    frozen_query: Query<&FrozenEffect>,
 ) {
     for (entity, action_state, max_speed) in query.iter() {
+        if frozen_query.iter().any(|it| it.target == entity) {
+            commands.entity(entity).insert(Velocity::zero());
+            continue;
+        }
         let speed = max_speed.linear;
         if let Some(move_axis_pair) = action_state.axis_pair(PlayerAction::Move) {
             let direction = move_axis_pair.xy();
@@ -368,14 +516,45 @@ pub fn player_move_system(
 
 pub fn player_pause_system(
     mut time: ResMut<Time<Virtual>>,
+    mut state: ResMut<NextState<GameState>>,
+    query: Query<(Entity, &ActionState<PlayerAction>), With<Player>>,
+) {
+    for (_, action_state) in query.iter() {
+        if action_state.just_pressed(PlayerAction::Pause) {
+            if !time.is_paused() {
+                state.set(GameState::Pause);
+                time.pause();
+            }
+        }
+    }
+}
+
+pub fn player_unpause_system(
+    mut time: ResMut<Time<Virtual>>,
+    mut state: ResMut<NextState<GameState>>,
     query: Query<(Entity, &ActionState<PlayerAction>), With<Player>>,
 ) {
     for (_, action_state) in query.iter() {
         if action_state.just_pressed(PlayerAction::Pause) {
             if time.is_paused() {
+                state.set(GameState::Running);
                 time.unpause();
-            } else {
-                time.pause();
+            }
+        }
+    }
+}
+
+pub fn player_restart_system(
+    mut commands: Commands,
+    query: Query<(Entity, &ActionState<PlayerAction>), With<Player>>,
+    mut events: EventWriter<GameEvent>,
+    clean_query: Query<(Entity), (Without<Camera>, Without<Window>)>,
+) {
+    for (_, action_state) in query.iter() {
+        if action_state.just_released(PlayerAction::Start) {
+            events.send(GameEvent::Start);
+            for entity in clean_query.iter() {
+                commands.entity(entity).despawn_recursive();
             }
         }
     }
@@ -391,8 +570,15 @@ pub fn player_swap_scale_system(
     }
 }
 
-pub fn apply_scale_system(time: Res<Time>, mut query: Query<(&Scale, &mut Transform)>) {
-    for (scale, mut transform) in query.iter_mut() {
+pub fn apply_scale_system(
+    time: Res<Time>,
+    mut query: Query<(Entity, &Scale, &mut Transform)>,
+    frozen_query: Query<&FrozenEffect>,
+) {
+    for (entity, scale, mut transform) in query.iter_mut() {
+        if frozen_query.iter().any(|it| it.target == entity) {
+            continue;
+        }
         scale.apply(time.delta(), &mut transform);
     }
 }
@@ -400,7 +586,9 @@ pub fn apply_scale_system(time: Res<Time>, mut query: Query<(&Scale, &mut Transf
 pub fn despawn_out_of_view(
     mut commands: Commands,
     camera_query: Query<(&Transform, &Velocity), With<Camera>>,
-    query: Query<(Entity, &ViewVisibility, &Transform), Without<Player>>,
+    is_player: Query<Entity, With<Player>>,
+    query: Query<(Entity, &ViewVisibility, &Transform)>,
+    mut events: EventWriter<GameEvent>,
 ) {
     let camera_info = camera_query.get_single().unwrap();
     let camera_position = camera_info.0.translation;
@@ -412,10 +600,14 @@ pub fn despawn_out_of_view(
         let angle = (transform.translation - camera_position)
             .truncate()
             .normalize_or_zero()
-            .angle_between(camera_dir);
-        if angle >= PI {
-            println!("despawn {:?}", entity);
-            commands.entity(entity).despawn_recursive();
+            .angle_between(camera_dir)
+            .abs();
+        if angle >= (90_f32).to_radians() && angle <= (270_f32).to_radians() {
+            if let Ok(_) = is_player.get(entity) {
+                events.send(GameEvent::GameOver);
+            } else {
+                commands.entity(entity).despawn_recursive();
+            }
         }
     }
 }
@@ -425,6 +617,7 @@ pub fn hit_obstacle_system(
     mut commands: Commands,
     mut player_query: Query<(Entity, &CollidingEntities, &Scale, &Transform), With<Player>>,
     obstacle_query: Query<(Entity, &Obstacle, &Transform)>,
+    mut events: EventWriter<GameEvent>,
 ) {
     for player_info in player_query.iter_mut() {
         let (player_entity, colliding_entities, scale, player_transform) = player_info;
@@ -445,7 +638,7 @@ pub fn hit_obstacle_system(
                     }
                 } else {
                     if penetration.abs() >= ORIGINAL_RADIUS * 2. * player_length {
-                        println!("kill player");
+                        events.send(GameEvent::GameOver);
                     }
                 }
             }
@@ -475,5 +668,74 @@ pub fn temporary_despawn_system(
         if temporary.timer.finished() {
             commands.entity(entity).despawn_recursive();
         }
+    }
+}
+
+pub fn time_score_system(
+    mut commands: Commands,
+    time: Res<Time>,
+    mut score_query: Query<(Entity, &mut TimeScore)>,
+) {
+    for (entity, mut score) in score_query.iter_mut() {
+        score.tick(time.delta());
+        commands.entity(entity).insert(Text::from_section(
+            score.to_string(),
+            TextStyle {
+                font_size: 64.,
+                ..default()
+            },
+        ));
+    }
+}
+
+pub fn game_event_system(
+    mut commands: Commands,
+    mut time: ResMut<Time<Virtual>>,
+    mut events: EventReader<GameEvent>,
+    mut state: ResMut<NextState<GameState>>,
+) {
+    for event in events.read() {
+        match event {
+            GameEvent::GameOver => {
+                time.pause();
+                state.set(GameState::Over);
+                commands.spawn(
+                    TextBundle::from_section(
+                        "Game Over",
+                        TextStyle {
+                            font_size: 64.,
+                            ..default()
+                        },
+                    )
+                    .with_style(Style {
+                        align_content: AlignContent::Center,
+                        top: Val::Auto,
+                        left: Val::Auto,
+                        width: Val::Percent(1.),
+                        ..default()
+                    }),
+                );
+            }
+            GameEvent::Start => {
+                state.set(GameState::Startup);
+            }
+        }
+    }
+}
+
+pub fn destroy_system(
+    mut commands: Commands,
+    query: Query<(Entity, &Destroy)>,
+    is_player: Query<(Entity), With<Player>>,
+    mut events: EventWriter<GameEvent>,
+) {
+    for (destroy_entity, destroy) in query.iter() {
+        let target = destroy.target;
+        if let Ok(player) = is_player.get(target) {
+            events.send(GameEvent::GameOver);
+        } else {
+            commands.entity(target).despawn();
+        }
+        commands.entity(destroy_entity).despawn();
     }
 }

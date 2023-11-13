@@ -6,7 +6,7 @@ fn main() {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
-            resizable: true,
+            resizable: false,
             resolution: WindowResolution::new(720., 1080.),
             ..default()
         }),
