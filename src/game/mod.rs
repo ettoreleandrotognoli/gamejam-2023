@@ -111,6 +111,15 @@ pub enum ObstacleKind {
 }
 
 impl ObstacleKind {
+    pub fn into_sprite_index(&self) -> usize {
+        match self {
+            Self::ScaleBust(dir) => if *dir { 6 } else { 2 },
+            Self::Block => 7,
+            Self::Ice => 4,
+            Self::Poison => 1,
+        }
+    }
+
     pub fn add_bundle<'w, 's, 'a>(&self, entity_commands: &mut EntityCommands<'w, 's, 'a>) {
         match self {
             Self::Block => {
@@ -583,12 +592,28 @@ pub fn spawn_obstacle_system(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut events: EventReader<SpawnObstacleEvent>,
+    asset_server: Res<AssetServer>,
+    mut texture_atlases: ResMut<Assets<TextureAtlas>>,
 ) {
+    let handler: Handle<Image> = asset_server.load("marbles.png");
+    let texture_atlas_handle = texture_atlases.add(TextureAtlas::from_grid(
+        handler,
+        Vec2::new(672., 672.),
+        3,
+        3,
+        Some(Vec2::new(210., 170.)),
+        None,
+    ));
     for event in events.read() {
         let material = materials.add(ColorMaterial::from(event.color));
         let circle = meshes.add(shape::Circle::new(event.radius).into());
-        let scale = Vec3::new(event.scale, event.scale, 1.);
-        let z = scale.length();
+	let scale = Vec3::new(event.scale, event.scale, 1.);
+	let z = scale.length();
+        let transform = Transform::from_translation(event.position).with_scale(Vec3::new(
+            event.scale,
+            event.scale,
+            z,
+        ));
         let mut obstacle_commands = commands.spawn(Obstacle { kind: event.kind });
         obstacle_commands
             .insert(Collider::ball(event.radius))
@@ -597,16 +622,26 @@ pub fn spawn_obstacle_system(
             //.insert(Sensor::default())
             .insert(ActiveEvents::all())
             //.insert(ActiveHooks::all())
-            .insert(MaterialMesh2dBundle {
-                mesh: circle.into(),
-                material: material,
-                transform: Transform {
-                    translation: event.position.truncate().extend(z),
-                    scale,
+            .insert(SpriteSheetBundle {
+                texture_atlas: texture_atlas_handle.clone(),
+                sprite: TextureAtlasSprite {
+                    index: event.kind.into_sprite_index(),
+                    custom_size: Some(Vec2::new(event.radius * 2., event.radius * 2.)),
                     ..default()
                 },
+                transform,
                 ..default()
             });
+        //.insert(MaterialMesh2dBundle {
+        //    mesh: circle.into(),
+        //    material: material,
+        //    transform: Transform::from_translation(event.position).with_scale(Vec3::new(
+        //        event.scale,
+        //        event.scale,
+        //        1.,
+        //    )),
+        //    ..Default::default()
+        //});
         event.kind.add_bundle(&mut obstacle_commands);
     }
 }
