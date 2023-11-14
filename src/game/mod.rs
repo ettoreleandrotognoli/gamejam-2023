@@ -2,7 +2,7 @@ use bevy::{
     app::PluginGroupBuilder, ecs::system::EntityCommands, prelude::*, sprite::MaterialMesh2dBundle,
 };
 use bevy_rapier2d::prelude::*;
-use bevy_turborand::prelude::*;
+use bevy_turborand::{prelude::*, DelegatedRng};
 use leafwing_input_manager::prelude::*;
 use std::{f32::consts::PI, time::Duration};
 
@@ -102,11 +102,6 @@ pub struct Temporary {
     timer: Timer,
 }
 
-#[derive(Component)]
-pub struct MaxSpeed {
-    linear: f32,
-}
-
 #[derive(Clone, Copy, Debug)]
 pub enum ObstacleKind {
     ScaleBust(bool),
@@ -118,23 +113,35 @@ pub enum ObstacleKind {
 impl ObstacleKind {
     pub fn add_bundle<'w, 's, 'a>(&self, entity_commands: &mut EntityCommands<'w, 's, 'a>) {
         match self {
-            Self::Block => (),
+            Self::Block => {
+                entity_commands.insert((
+                    RigidBody::Fixed,
+                    CollisionGroups::new(Group::all(), Group::all()),
+                    SolverGroups::new(Group::all(), Group::all()),
+                ));
+            }
             Self::ScaleBust(_) => {
                 entity_commands.insert((
                     CollisionGroups::new(Group::all(), Group::all()),
-                    SolverGroups::new(Group::all(), Group::NONE),
+                    SolverGroups::new(Group::from_bits_retain(0b10), Group::all()),
+                    RigidBody::Dynamic,
+                    Enemy::lazy_aggressive(),
                 ));
             }
             Self::Ice => {
                 entity_commands.insert((
                     CollisionGroups::new(Group::all(), Group::all()),
-                    SolverGroups::new(Group::all(), Group::NONE),
+                    SolverGroups::new(Group::from_bits_retain(0b10), Group::all()),
+                    RigidBody::Dynamic,
+                    Enemy::lazy_suicide_aggressive(),
                 ));
             }
             Self::Poison => {
                 entity_commands.insert((
                     CollisionGroups::new(Group::all(), Group::all()),
-                    SolverGroups::new(Group::all(), Group::NONE),
+                    SolverGroups::new(Group::from_bits_retain(0b10), Group::all()),
+                    RigidBody::Dynamic,
+                    Enemy::lazy_suicide(),
                 ));
             }
         }
@@ -200,7 +207,12 @@ pub struct BustEffect {
 
 impl BustEffect {
     pub fn apply(&self, delta: Duration, transform: &mut Transform) {
-        transform.scale *= 1. + (self.speed * delta.as_secs_f32());
+        let new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
+        transform.scale = Vec3::new(
+            f32::min(f32::max(new_scale.x, 0.1), 20.),
+            f32::min(f32::max(new_scale.y, 0.1), 20.),
+            1.,
+        );
     }
 }
 
@@ -214,8 +226,125 @@ pub struct Destroy {
     target: Entity,
 }
 
+pub fn calc_speed(transform: &Transform) -> f32 {
+    1. / (transform.scale.truncate().length().sqrt()) * 200.
+}
 #[derive(Component)]
 pub struct Player {}
+
+pub enum Strategy {
+    None,
+    Follow { max_distance: f32 },
+    Run { max_distance: f32 },
+}
+
+impl Strategy {
+    pub fn calc(&self, direction: Vec2, distance: f32) -> Vec2 {
+        match self {
+            Self::None => Vec2::ZERO,
+            Self::Follow { max_distance } => {
+                if *max_distance >= distance {
+                    direction
+                } else {
+                    Vec2::ZERO
+                }
+            }
+            Self::Run { max_distance } => {
+                if *max_distance >= distance {
+                    -direction
+                } else {
+                    Vec2::ZERO
+                }
+            }
+        }
+    }
+}
+
+#[derive(Component)]
+pub struct Enemy {
+    when_bigger: Strategy,
+    when_smaller: Strategy,
+    when_equal: Strategy,
+}
+
+impl Enemy {
+    pub fn lazy_suicide() -> Self {
+        Self {
+            when_bigger: Strategy::None,
+            when_smaller: Strategy::Follow { max_distance: 128. },
+            when_equal: Strategy::None,
+        }
+    }
+
+    pub fn lazy_smart_aggressive() -> Self {
+        Self {
+            when_bigger: Strategy::Follow { max_distance: 128. },
+            when_smaller: Strategy::Run { max_distance: 128. },
+            when_equal: Strategy::None,
+        }
+    }
+
+    pub fn lazy_aggressive() -> Self {
+        Self {
+            when_bigger: Strategy::Follow { max_distance: 128. },
+            when_smaller: Strategy::None,
+            when_equal: Strategy::None,
+        }
+    }
+
+    pub fn lazy_suicide_aggressive() -> Self {
+        Self {
+            when_bigger: Strategy::Follow { max_distance: 128. },
+            when_smaller: Strategy::Follow { max_distance: 128. },
+            when_equal: Strategy::None,
+        }
+    }
+
+    pub fn smart_aggressive() -> Self {
+        Self {
+            when_bigger: Strategy::Follow {
+                max_distance: f32::INFINITY,
+            },
+            when_smaller: Strategy::Run {
+                max_distance: f32::INFINITY,
+            },
+            when_equal: Strategy::None,
+        }
+    }
+
+    pub fn tick(
+        &self,
+        enemy: (&Transform, &Velocity),
+        player: (&Transform, &Velocity),
+    ) -> Velocity {
+        let enemy_length = enemy.0.scale.length();
+        let player_length = player.0.scale.length();
+        let player_radius = player.0.scale.length() * ORIGINAL_RADIUS;
+        let diff = player.0.translation.truncate() - enemy.0.translation.truncate();
+        let direction = diff.normalize_or_zero();
+        let distance = f32::max(diff.length() - player_radius, 0.);
+
+        let enemy_direction = if enemy_length > player_length {
+            self.when_bigger.calc(direction, distance)
+        } else if player_length > enemy_length {
+            self.when_smaller.calc(direction, distance)
+        } else {
+            self.when_equal.calc(direction, distance)
+        };
+
+        Velocity::linear(enemy_direction * calc_speed(enemy.0))
+    }
+}
+
+impl Default for Enemy {
+    fn default() -> Self {
+        Self {
+            when_bigger: Strategy::None,
+            when_smaller: Strategy::None,
+            when_equal: Strategy::None,
+        }
+    }
+}
 
 #[derive(Component)]
 pub struct TimeScore {
@@ -253,7 +382,12 @@ impl Scale {
     }
 
     pub fn apply(&self, delta: Duration, transform: &mut Transform) {
-        transform.scale *= 1. + (self.speed * delta.as_secs_f32());
+        let new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
+        transform.scale = Vec3::new(
+            f32::min(f32::max(new_scale.x, 0.1), 20.),
+            f32::min(f32::max(new_scale.y, 0.1), 20.),
+            1.,
+        );
     }
 }
 
@@ -301,6 +435,7 @@ impl Plugin for GamePlugin {
                     temporary_despawn_system,
                     time_score_system,
                     destroy_system,
+                    enemy_system,
                 )
                     .run_if(in_state(GameState::Running)),
             )
@@ -391,13 +526,14 @@ impl ObstacleFactoryComponent {
         let camera_direction = camera_velocity.linvel.normalize_or_zero();
         let obstacle_direction = camera_direction.rotate(Vec2::from_angle(PI / 2.));
         let obstacle_middle =
-            camera_transform.translation.truncate() + (camera_direction * 1080. / 2.);
+            camera_transform.translation.truncate() + (camera_direction * 1080. / 2. + 64.);
         for _ in 0..2 {
+            let scale = 0.75 + random.f32() * 0.50;
             let position =
                 obstacle_middle + obstacle_direction * random.f32_normalized() * 720. / 2.;
             let kind = match random.u8(0..=4) {
-                0 => ObstacleKind::ScaleBust(random.bool()),
-                1 => ObstacleKind::ScaleBust(random.bool()),
+                0 => ObstacleKind::ScaleBust(true),
+                1 => ObstacleKind::ScaleBust(false),
                 2 => ObstacleKind::Block,
                 3 => ObstacleKind::Ice,
                 4 => ObstacleKind::Poison,
@@ -407,6 +543,7 @@ impl ObstacleFactoryComponent {
                 color: kind.get_color(),
                 position: position.extend(0.),
                 radius: ORIGINAL_RADIUS,
+                scale,
                 kind,
             })
         }
@@ -418,6 +555,7 @@ pub struct SpawnObstacleEvent {
     pub color: Color,
     pub position: Vec3,
     pub radius: f32,
+    pub scale: f32,
     pub kind: ObstacleKind,
 }
 
@@ -451,7 +589,6 @@ pub fn spawn_obstacle_system(
         obstacle_commands
             .insert(Collider::ball(event.radius))
             .insert(Sleeping::disabled())
-            .insert(RigidBody::Fixed)
             //.insert(CollidingEntities::default())
             //.insert(Sensor::default())
             .insert(ActiveEvents::all())
@@ -459,7 +596,11 @@ pub fn spawn_obstacle_system(
             .insert(MaterialMesh2dBundle {
                 mesh: circle.into(),
                 material: material,
-                transform: Transform::from_translation(event.position),
+                transform: Transform::from_translation(event.position).with_scale(Vec3::new(
+                    event.scale,
+                    event.scale,
+                    1.,
+                )),
                 ..Default::default()
             });
         event.kind.add_bundle(&mut obstacle_commands);
@@ -477,7 +618,6 @@ pub fn spawn_player_system(
     let circle = meshes.add(shape::Circle::new(initial_size).into());
     commands
         .spawn(Player::default())
-        .insert(MaxSpeed { linear: 200. })
         .insert(create_input_manager())
         .insert(Scale {
             speed: initial_scale_speed,
@@ -489,6 +629,11 @@ pub fn spawn_player_system(
         .insert(ActiveHooks::FILTER_CONTACT_PAIRS)
         //.insert(RigidBody::KinematicVelocityBased)
         .insert(RigidBody::Dynamic)
+        .insert(CollisionGroups::new(Group::all(), Group::all()))
+        .insert(SolverGroups::new(
+            Group::from_bits_retain(0b1),
+            Group::from_bits_retain(0b1),
+        ))
         .insert(MaterialMesh2dBundle {
             mesh: circle.into(),
             material: material,
@@ -499,15 +644,15 @@ pub fn spawn_player_system(
 
 pub fn player_move_system(
     mut commands: Commands,
-    query: Query<(Entity, &ActionState<PlayerAction>, &MaxSpeed), With<Player>>,
+    query: Query<(Entity, &ActionState<PlayerAction>, &Transform), With<Player>>,
     frozen_query: Query<&FrozenEffect>,
 ) {
-    for (entity, action_state, max_speed) in query.iter() {
+    for (entity, action_state, transform) in query.iter() {
         if frozen_query.iter().any(|it| it.target == entity) {
             commands.entity(entity).insert(Velocity::zero());
             continue;
         }
-        let speed = max_speed.linear;
+        let speed = calc_speed(transform);
         if let Some(move_axis_pair) = action_state.axis_pair(PlayerAction::Move) {
             let direction = move_axis_pair.xy();
             let speed = direction.normalize_or_zero() * speed;
@@ -739,5 +884,20 @@ pub fn destroy_system(
             commands.entity(target).despawn();
         }
         commands.entity(destroy_entity).despawn();
+    }
+}
+
+pub fn enemy_system(
+    mut commands: Commands,
+    enemy_query: Query<(Entity, &Enemy, &Transform)>,
+    player_query: Query<(Entity, &Transform), With<Player>>,
+) {
+    let (player, player_transform) = player_query.get_single().unwrap();
+    for (enemy, enemy_strategy, enemy_transform) in enemy_query.iter() {
+        let velocity = enemy_strategy.tick(
+            (enemy_transform, &Velocity::zero()),
+            (player_transform, &Velocity::zero()),
+        );
+        commands.entity(enemy).try_insert(velocity);
     }
 }
