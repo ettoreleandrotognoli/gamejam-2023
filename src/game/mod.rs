@@ -382,12 +382,14 @@ impl Scale {
     }
 
     pub fn apply(&self, delta: Duration, transform: &mut Transform) {
-        let new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
-        transform.scale = Vec3::new(
+        let mut new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
+        new_scale = Vec3::new(
             f32::min(f32::max(new_scale.x, 0.1), 20.),
             f32::min(f32::max(new_scale.y, 0.1), 20.),
             1.,
         );
+        transform.translation.z = new_scale.length();
+        transform.scale = new_scale;
     }
 }
 
@@ -585,6 +587,8 @@ pub fn spawn_obstacle_system(
     for event in events.read() {
         let material = materials.add(ColorMaterial::from(event.color));
         let circle = meshes.add(shape::Circle::new(event.radius).into());
+        let scale = Vec3::new(event.scale, event.scale, 1.);
+        let z = scale.length();
         let mut obstacle_commands = commands.spawn(Obstacle { kind: event.kind });
         obstacle_commands
             .insert(Collider::ball(event.radius))
@@ -596,12 +600,12 @@ pub fn spawn_obstacle_system(
             .insert(MaterialMesh2dBundle {
                 mesh: circle.into(),
                 material: material,
-                transform: Transform::from_translation(event.position).with_scale(Vec3::new(
-                    event.scale,
-                    event.scale,
-                    1.,
-                )),
-                ..Default::default()
+                transform: Transform {
+                    translation: event.position.truncate().extend(z),
+                    scale,
+                    ..default()
+                },
+                ..default()
             });
         event.kind.add_bundle(&mut obstacle_commands);
     }
