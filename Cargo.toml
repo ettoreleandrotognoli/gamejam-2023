@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 bevy = { version = "0.12" }
+bevy-parallax = "0.7.0"
 bevy_rapier2d = "0.23.0"
 bevy_turborand = "0.7.0"
 leafwing-input-manager = "0.11.1"

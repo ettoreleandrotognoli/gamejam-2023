@@ -1,6 +1,10 @@
 use bevy::{
     app::PluginGroupBuilder, ecs::system::EntityCommands, prelude::*, sprite::MaterialMesh2dBundle,
 };
+use bevy_parallax::{
+    CreateParallaxEvent, LayerComponent, LayerData, LayerRepeat, LayerSpeed, LayerTextureComponent,
+    ParallaxCameraComponent, ParallaxMoveEvent, ParallaxPlugin, ParallaxSystems, RepeatStrategy,
+};
 use bevy_rapier2d::prelude::*;
 use bevy_turborand::{prelude::*, DelegatedRng};
 use leafwing_input_manager::prelude::*;
@@ -82,6 +86,7 @@ impl PluginGroup for GamePlugins {
             .add(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(1.0))
             .add(GamePlugin::default())
             .add(InputManagerPlugin::<PlayerAction>::default())
+            .add(ParallaxPlugin)
             .add(RngPlugin::default());
         #[cfg(debug_assertions)]
         {
@@ -113,7 +118,13 @@ pub enum ObstacleKind {
 impl ObstacleKind {
     pub fn into_sprite_index(&self) -> usize {
         match self {
-            Self::ScaleBust(dir) => if *dir { 6 } else { 2 },
+            Self::ScaleBust(dir) => {
+                if *dir {
+                    6
+                } else {
+                    2
+                }
+            }
             Self::Block => 7,
             Self::Ice => 4,
             Self::Poison => 1,
@@ -447,6 +458,7 @@ impl Plugin for GamePlugin {
                     time_score_system,
                     destroy_system,
                     enemy_system,
+                    move_camera_system.before(ParallaxSystems),
                 )
                     .run_if(in_state(GameState::Running)),
             )
@@ -460,9 +472,25 @@ impl Default for GamePlugin {
     }
 }
 
-pub fn reset_camera_system(mut query: Query<(&mut Transform), With<Camera>>) {
-    for mut transform in query.iter_mut() {
+pub fn reset_camera_system(
+    mut query: Query<(Entity, &mut Transform), With<Camera>>,
+    mut create_parallax: EventWriter<CreateParallaxEvent>,
+) {
+    for (camera, mut transform) in query.iter_mut() {
         transform.translation = Vec3::ZERO;
+        create_parallax.send(CreateParallaxEvent {
+            camera,
+            layers_data: vec![LayerData {
+                path: "grid.png".to_string(),
+                tile_size: Vec2::new(768., 512.),
+                speed: LayerSpeed::Bidirectional(0., 0.),
+                repeat: LayerRepeat::Bidirectional(RepeatStrategy::Mirror, RepeatStrategy::Mirror),
+                z: -1.,
+                rows: 1,
+                cols: 1,
+                ..default()
+            }],
+        });
     }
 }
 
@@ -504,13 +532,41 @@ pub fn spawn_world(
         .insert(TimeScore::default());
 }
 
-pub fn spawn_camera_system(mut commands: Commands) {
-    commands
+pub fn move_camera_system(
+    time: Res<Time>,
+    query: Query<(Entity, &Velocity), With<ParallaxCameraComponent>>,
+    mut move_camera: EventWriter<ParallaxMoveEvent>,
+) {
+    for (camera, velocity) in query.iter() {
+        move_camera.send(ParallaxMoveEvent {
+            camera_move_speed: velocity.linvel * time.delta_seconds(),
+            camera,
+        });
+    }
+}
+
+pub fn spawn_camera_system(
+    mut commands: Commands,
+    mut create_parallax: EventWriter<CreateParallaxEvent>,
+) {
+    let camera = commands
         .spawn(Camera2dBundle::default())
-        .insert(Sleeping::disabled())
-        .insert(Ccd::enabled())
-        .insert(RigidBody::KinematicVelocityBased)
-        .insert(Velocity::linear(Vec2::new(0., 80.)));
+        .insert(ParallaxCameraComponent::default())
+        .insert(Velocity::linear(Vec2::new(0., 80.)))
+        .id();
+    create_parallax.send(CreateParallaxEvent {
+        camera,
+        layers_data: vec![LayerData {
+            path: "grid.png".to_string(),
+            tile_size: Vec2::new(768., 512.),
+            speed: LayerSpeed::Bidirectional(0., 0.),
+            repeat: LayerRepeat::Bidirectional(RepeatStrategy::Mirror, RepeatStrategy::Mirror),
+            z: -1.,
+            rows: 1,
+            cols: 1,
+            ..default()
+        }],
+    });
 }
 
 #[derive(Component)]
@@ -773,7 +829,10 @@ pub fn despawn_out_of_view(
     mut commands: Commands,
     camera_query: Query<(&Transform, &Velocity), With<Camera>>,
     is_player: Query<Entity, With<Player>>,
-    query: Query<(Entity, &ViewVisibility, &Transform)>,
+    query: Query<
+        (Entity, &ViewVisibility, &Transform),
+        (Without<LayerComponent>, Without<LayerTextureComponent>),
+    >,
     mut events: EventWriter<GameEvent>,
 ) {
     let camera_info = camera_query.get_single().unwrap();
@@ -868,6 +927,7 @@ pub fn time_score_system(
             score.to_string(),
             TextStyle {
                 font_size: 64.,
+                color: Color::DARK_GRAY,
                 ..default()
             },
         ));

@@ -13,7 +13,7 @@ fn main() {
             .set(WindowPlugin {
                 primary_window: Some(Window {
                     resizable: false,
-                    resolution: WindowResolution::new(720., 1080.),
+                    resolution: (720., 1080.).into(),
                     ..default()
                 }),
                 ..default()
