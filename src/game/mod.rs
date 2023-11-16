@@ -710,7 +710,7 @@ pub fn spawn_obstacle_system(
         Vec2::new(672., 672.),
         3,
         3,
-        Some(Vec2::new(210., 170.)),
+        Some(Vec2::new(216., 170.)),
         None,
     ));
     for event in events.read() {
