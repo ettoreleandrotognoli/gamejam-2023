@@ -96,6 +96,47 @@ impl PluginGroup for GamePlugins {
     }
 }
 
+pub enum SpriteUpdateStrategy {
+    Linear,
+    Boomerang(bool),
+}
+
+impl SpriteUpdateStrategy {
+    pub fn next(&mut self, current: usize, total: usize) -> usize {
+        match self {
+            Self::Linear => (current + 1) % total,
+            Self::Boomerang(dir) => {
+                let result = if *dir {
+                    current + 1 % total
+                } else {
+                    current - 1 % total
+                };
+                if result == 0 || result == total -1{
+                    *dir = !*dir;
+                }
+                result
+            }
+        }
+    }
+}
+#[derive(Component)]
+pub struct SpriteUpdate {
+    pub total: usize,
+    pub timer: Timer,
+    pub strategy: SpriteUpdateStrategy,
+}
+
+impl SpriteUpdate {
+    fn tick_and_next(&mut self, delta: Duration, current: usize) -> usize {
+        self.timer.tick(delta);
+        if self.timer.just_finished() {
+            self.strategy.next(current, self.total)
+        } else {
+            current
+        }
+    }
+}
+
 #[derive(Event)]
 pub enum GameEvent {
     Start,
@@ -471,6 +512,7 @@ impl Plugin for GamePlugin {
                     time_score_system,
                     destroy_system,
                     enemy_system,
+                    sprite_update_system,
                     move_camera_system.before(ParallaxSystems),
                 )
                     .run_if(in_state(GameState::Running)),
@@ -706,11 +748,20 @@ pub fn spawn_player_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    asset_server: Res<AssetServer>,
+    mut texture_atlases: ResMut<Assets<TextureAtlas>>,
 ) {
+    let handler: Handle<Image> = asset_server.load("shadow-sprite.png");
+    let texture_atlas_handle = texture_atlases.add(TextureAtlas::from_grid(
+        handler,
+        Vec2::new(705., 705.),
+        1,
+        4,
+        None,
+        None,
+    ));
     let initial_scale_speed = 0.5;
     let initial_size = ORIGINAL_RADIUS;
-    let material = materials.add(ColorMaterial::from(Color::CYAN));
-    let circle = meshes.add(shape::Circle::new(initial_size).into());
     commands
         .spawn(Player::default())
         .insert(create_input_manager())
@@ -729,11 +780,19 @@ pub fn spawn_player_system(
             Group::from_bits_retain(0b1),
             Group::from_bits_retain(0b1),
         ))
-        .insert(MaterialMesh2dBundle {
-            mesh: circle.into(),
-            material: material,
+        .insert(SpriteUpdate {
+            total: 4,
+            timer: Timer::new(Duration::from_millis(200), TimerMode::Repeating),
+            strategy: SpriteUpdateStrategy::Boomerang(true),
+        })
+        .insert(SpriteSheetBundle {
+            texture_atlas: texture_atlas_handle.clone(),
+            sprite: TextureAtlasSprite {
+                custom_size: Some(Vec2::new(92., 92.)),
+                ..default()
+            },
             transform: Transform::from_translation(Vec3::new(0., 0., 1.)),
-            ..Default::default()
+            ..default()
         });
 }
 
@@ -999,5 +1058,14 @@ pub fn enemy_system(
             (player_transform, &Velocity::zero()),
         );
         commands.entity(enemy).try_insert(velocity);
+    }
+}
+
+pub fn sprite_update_system(
+    time: Res<Time>,
+    mut query: Query<(&mut SpriteUpdate, &mut TextureAtlasSprite)>,
+) {
+    for (mut sprite_update, mut sprite) in query.iter_mut() {
+        sprite.index = sprite_update.tick_and_next(time.delta(), sprite.index);
     }
 }
