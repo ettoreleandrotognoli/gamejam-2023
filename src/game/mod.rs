@@ -227,12 +227,14 @@ pub struct BustEffect {
 
 impl BustEffect {
     pub fn apply(&self, delta: Duration, transform: &mut Transform) {
-        let new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
-        transform.scale = Vec3::new(
+        let mut new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
+        new_scale = Vec3::new(
             f32::min(f32::max(new_scale.x, 0.1), 20.),
             f32::min(f32::max(new_scale.y, 0.1), 20.),
             1.,
         );
+        transform.translation.z = new_scale.length();
+        transform.scale = new_scale;
     }
 }
 
@@ -645,8 +647,6 @@ pub fn obstacle_factory_system(
 
 pub fn spawn_obstacle_system(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
     mut events: EventReader<SpawnObstacleEvent>,
     asset_server: Res<AssetServer>,
     mut texture_atlases: ResMut<Assets<TextureAtlas>>,
@@ -661,14 +661,13 @@ pub fn spawn_obstacle_system(
         None,
     ));
     for event in events.read() {
-        let material = materials.add(ColorMaterial::from(event.color));
-        let circle = meshes.add(shape::Circle::new(event.radius).into());
-	let scale = Vec3::new(event.scale, event.scale, 1.);
-	let z = scale.length();
-        let transform = Transform::from_translation(event.position).with_scale(Vec3::new(
+        let scale = Vec3::new(event.scale, event.scale, 1.);
+        let z = scale.length();
+        let translation = event.position.truncate().extend(z);
+        let transform = Transform::from_translation(translation).with_scale(Vec3::new(
             event.scale,
             event.scale,
-            z,
+            1.,
         ));
         let mut obstacle_commands = commands.spawn(Obstacle { kind: event.kind });
         obstacle_commands
@@ -688,16 +687,6 @@ pub fn spawn_obstacle_system(
                 transform,
                 ..default()
             });
-        //.insert(MaterialMesh2dBundle {
-        //    mesh: circle.into(),
-        //    material: material,
-        //    transform: Transform::from_translation(event.position).with_scale(Vec3::new(
-        //        event.scale,
-        //        event.scale,
-        //        1.,
-        //    )),
-        //    ..Default::default()
-        //});
         event.kind.add_bundle(&mut obstacle_commands);
     }
 }
@@ -949,6 +938,7 @@ pub fn game_event_system(
                     TextBundle::from_section(
                         "Game Over",
                         TextStyle {
+                            color: Color::DARK_GRAY,
                             font_size: 64.,
                             ..default()
                         },
