@@ -1,6 +1,10 @@
 use bevy::{
     app::PluginGroupBuilder, ecs::system::EntityCommands, prelude::*, sprite::MaterialMesh2dBundle,
 };
+use bevy_parallax::{
+    CreateParallaxEvent, LayerComponent, LayerData, LayerRepeat, LayerSpeed, LayerTextureComponent,
+    ParallaxCameraComponent, ParallaxMoveEvent, ParallaxPlugin, ParallaxSystems, RepeatStrategy,
+};
 use bevy_rapier2d::prelude::*;
 use bevy_turborand::{prelude::*, DelegatedRng};
 use leafwing_input_manager::prelude::*;
@@ -82,12 +86,54 @@ impl PluginGroup for GamePlugins {
             .add(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(1.0))
             .add(GamePlugin::default())
             .add(InputManagerPlugin::<PlayerAction>::default())
+            .add(ParallaxPlugin)
             .add(RngPlugin::default());
         #[cfg(debug_assertions)]
         {
             group = group.add(RapierDebugRenderPlugin::default());
         }
         group
+    }
+}
+
+pub enum SpriteUpdateStrategy {
+    Linear,
+    Boomerang(bool),
+}
+
+impl SpriteUpdateStrategy {
+    pub fn next(&mut self, current: usize, total: usize) -> usize {
+        match self {
+            Self::Linear => (current + 1) % total,
+            Self::Boomerang(dir) => {
+                let result = if *dir {
+                    current + 1 % total
+                } else {
+                    current - 1 % total
+                };
+                if result == 0 || result == total -1{
+                    *dir = !*dir;
+                }
+                result
+            }
+        }
+    }
+}
+#[derive(Component)]
+pub struct SpriteUpdate {
+    pub total: usize,
+    pub timer: Timer,
+    pub strategy: SpriteUpdateStrategy,
+}
+
+impl SpriteUpdate {
+    fn tick_and_next(&mut self, delta: Duration, current: usize) -> usize {
+        self.timer.tick(delta);
+        if self.timer.just_finished() {
+            self.strategy.next(current, self.total)
+        } else {
+            current
+        }
     }
 }
 
@@ -111,6 +157,21 @@ pub enum ObstacleKind {
 }
 
 impl ObstacleKind {
+    pub fn into_sprite_index(&self) -> usize {
+        match self {
+            Self::ScaleBust(dir) => {
+                if *dir {
+                    6
+                } else {
+                    2
+                }
+            }
+            Self::Block => 7,
+            Self::Ice => 4,
+            Self::Poison => 1,
+        }
+    }
+
     pub fn add_bundle<'w, 's, 'a>(&self, entity_commands: &mut EntityCommands<'w, 's, 'a>) {
         match self {
             Self::Block => {
@@ -207,12 +268,14 @@ pub struct BustEffect {
 
 impl BustEffect {
     pub fn apply(&self, delta: Duration, transform: &mut Transform) {
-        let new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
-        transform.scale = Vec3::new(
+        let mut new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
+        new_scale = Vec3::new(
             f32::min(f32::max(new_scale.x, 0.1), 20.),
             f32::min(f32::max(new_scale.y, 0.1), 20.),
             1.,
         );
+        transform.translation.z = new_scale.length();
+        transform.scale = new_scale;
     }
 }
 
@@ -265,6 +328,7 @@ pub struct Enemy {
     when_bigger: Strategy,
     when_smaller: Strategy,
     when_equal: Strategy,
+    inertia: f32,
 }
 
 impl Enemy {
@@ -273,6 +337,7 @@ impl Enemy {
             when_bigger: Strategy::None,
             when_smaller: Strategy::Follow { max_distance: 128. },
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -281,6 +346,7 @@ impl Enemy {
             when_bigger: Strategy::Follow { max_distance: 128. },
             when_smaller: Strategy::Run { max_distance: 128. },
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -289,6 +355,7 @@ impl Enemy {
             when_bigger: Strategy::Follow { max_distance: 128. },
             when_smaller: Strategy::None,
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -297,6 +364,7 @@ impl Enemy {
             when_bigger: Strategy::Follow { max_distance: 128. },
             when_smaller: Strategy::Follow { max_distance: 128. },
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -309,6 +377,7 @@ impl Enemy {
                 max_distance: f32::INFINITY,
             },
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -324,7 +393,7 @@ impl Enemy {
         let direction = diff.normalize_or_zero();
         let distance = f32::max(diff.length() - player_radius, 0.);
 
-        let enemy_direction = if enemy_length > player_length {
+        let enemy_target_direction = if enemy_length > player_length {
             self.when_bigger.calc(direction, distance)
         } else if player_length > enemy_length {
             self.when_smaller.calc(direction, distance)
@@ -332,7 +401,11 @@ impl Enemy {
             self.when_equal.calc(direction, distance)
         };
 
-        Velocity::linear(enemy_direction * calc_speed(enemy.0))
+        let target_lin_velocity = enemy_target_direction * calc_speed(enemy.0);
+        let final_lin_dir =
+            enemy.1.linvel * self.inertia + target_lin_velocity * (1. - self.inertia);
+
+        Velocity::linear(final_lin_dir.normalize_or_zero() * calc_speed(enemy.0))
     }
 }
 
@@ -342,6 +415,7 @@ impl Default for Enemy {
             when_bigger: Strategy::None,
             when_smaller: Strategy::None,
             when_equal: Strategy::None,
+            inertia: 0.9,
         }
     }
 }
@@ -382,12 +456,14 @@ impl Scale {
     }
 
     pub fn apply(&self, delta: Duration, transform: &mut Transform) {
-        let new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
-        transform.scale = Vec3::new(
+        let mut new_scale = transform.scale * 1. + (self.speed * delta.as_secs_f32());
+        new_scale = Vec3::new(
             f32::min(f32::max(new_scale.x, 0.1), 20.),
             f32::min(f32::max(new_scale.y, 0.1), 20.),
             1.,
         );
+        transform.translation.z = new_scale.length();
+        transform.scale = new_scale;
     }
 }
 
@@ -436,6 +512,8 @@ impl Plugin for GamePlugin {
                     time_score_system,
                     destroy_system,
                     enemy_system,
+                    sprite_update_system,
+                    move_camera_system.before(ParallaxSystems),
                 )
                     .run_if(in_state(GameState::Running)),
             )
@@ -449,9 +527,25 @@ impl Default for GamePlugin {
     }
 }
 
-pub fn reset_camera_system(mut query: Query<(&mut Transform), With<Camera>>) {
-    for mut transform in query.iter_mut() {
+pub fn reset_camera_system(
+    mut query: Query<(Entity, &mut Transform), With<Camera>>,
+    mut create_parallax: EventWriter<CreateParallaxEvent>,
+) {
+    for (camera, mut transform) in query.iter_mut() {
         transform.translation = Vec3::ZERO;
+        create_parallax.send(CreateParallaxEvent {
+            camera,
+            layers_data: vec![LayerData {
+                path: "grid.png".to_string(),
+                tile_size: Vec2::new(768., 512.),
+                speed: LayerSpeed::Bidirectional(0., 0.),
+                repeat: LayerRepeat::Bidirectional(RepeatStrategy::Mirror, RepeatStrategy::Mirror),
+                z: -1.,
+                rows: 1,
+                cols: 1,
+                ..default()
+            }],
+        });
     }
 }
 
@@ -493,13 +587,41 @@ pub fn spawn_world(
         .insert(TimeScore::default());
 }
 
-pub fn spawn_camera_system(mut commands: Commands) {
-    commands
+pub fn move_camera_system(
+    time: Res<Time>,
+    query: Query<(Entity, &Velocity), With<ParallaxCameraComponent>>,
+    mut move_camera: EventWriter<ParallaxMoveEvent>,
+) {
+    for (camera, velocity) in query.iter() {
+        move_camera.send(ParallaxMoveEvent {
+            camera_move_speed: velocity.linvel * time.delta_seconds(),
+            camera,
+        });
+    }
+}
+
+pub fn spawn_camera_system(
+    mut commands: Commands,
+    mut create_parallax: EventWriter<CreateParallaxEvent>,
+) {
+    let camera = commands
         .spawn(Camera2dBundle::default())
-        .insert(Sleeping::disabled())
-        .insert(Ccd::enabled())
-        .insert(RigidBody::KinematicVelocityBased)
-        .insert(Velocity::linear(Vec2::new(0., 80.)));
+        .insert(ParallaxCameraComponent::default())
+        .insert(Velocity::linear(Vec2::new(0., 80.)))
+        .id();
+    create_parallax.send(CreateParallaxEvent {
+        camera,
+        layers_data: vec![LayerData {
+            path: "grid.png".to_string(),
+            tile_size: Vec2::new(768., 512.),
+            speed: LayerSpeed::Bidirectional(0., 0.),
+            repeat: LayerRepeat::Bidirectional(RepeatStrategy::Mirror, RepeatStrategy::Mirror),
+            z: -1.,
+            rows: 1,
+            cols: 1,
+            ..default()
+        }],
+    });
 }
 
 #[derive(Component)]
@@ -578,13 +700,28 @@ pub fn obstacle_factory_system(
 
 pub fn spawn_obstacle_system(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
     mut events: EventReader<SpawnObstacleEvent>,
+    asset_server: Res<AssetServer>,
+    mut texture_atlases: ResMut<Assets<TextureAtlas>>,
 ) {
+    let handler: Handle<Image> = asset_server.load("marbles.png");
+    let texture_atlas_handle = texture_atlases.add(TextureAtlas::from_grid(
+        handler,
+        Vec2::new(672., 672.),
+        3,
+        3,
+        Some(Vec2::new(210., 170.)),
+        None,
+    ));
     for event in events.read() {
-        let material = materials.add(ColorMaterial::from(event.color));
-        let circle = meshes.add(shape::Circle::new(event.radius).into());
+        let scale = Vec3::new(event.scale, event.scale, 1.);
+        let z = scale.length();
+        let translation = event.position.truncate().extend(z);
+        let transform = Transform::from_translation(translation).with_scale(Vec3::new(
+            event.scale,
+            event.scale,
+            1.,
+        ));
         let mut obstacle_commands = commands.spawn(Obstacle { kind: event.kind });
         obstacle_commands
             .insert(Collider::ball(event.radius))
@@ -593,15 +730,15 @@ pub fn spawn_obstacle_system(
             //.insert(Sensor::default())
             .insert(ActiveEvents::all())
             //.insert(ActiveHooks::all())
-            .insert(MaterialMesh2dBundle {
-                mesh: circle.into(),
-                material: material,
-                transform: Transform::from_translation(event.position).with_scale(Vec3::new(
-                    event.scale,
-                    event.scale,
-                    1.,
-                )),
-                ..Default::default()
+            .insert(SpriteSheetBundle {
+                texture_atlas: texture_atlas_handle.clone(),
+                sprite: TextureAtlasSprite {
+                    index: event.kind.into_sprite_index(),
+                    custom_size: Some(Vec2::new(event.radius * 2., event.radius * 2.)),
+                    ..default()
+                },
+                transform,
+                ..default()
             });
         event.kind.add_bundle(&mut obstacle_commands);
     }
@@ -611,11 +748,20 @@ pub fn spawn_player_system(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    asset_server: Res<AssetServer>,
+    mut texture_atlases: ResMut<Assets<TextureAtlas>>,
 ) {
+    let handler: Handle<Image> = asset_server.load("shadow-sprite.png");
+    let texture_atlas_handle = texture_atlases.add(TextureAtlas::from_grid(
+        handler,
+        Vec2::new(705., 705.),
+        1,
+        4,
+        None,
+        None,
+    ));
     let initial_scale_speed = 0.5;
     let initial_size = ORIGINAL_RADIUS;
-    let material = materials.add(ColorMaterial::from(Color::CYAN));
-    let circle = meshes.add(shape::Circle::new(initial_size).into());
     commands
         .spawn(Player::default())
         .insert(create_input_manager())
@@ -634,11 +780,19 @@ pub fn spawn_player_system(
             Group::from_bits_retain(0b1),
             Group::from_bits_retain(0b1),
         ))
-        .insert(MaterialMesh2dBundle {
-            mesh: circle.into(),
-            material: material,
+        .insert(SpriteUpdate {
+            total: 4,
+            timer: Timer::new(Duration::from_millis(200), TimerMode::Repeating),
+            strategy: SpriteUpdateStrategy::Boomerang(true),
+        })
+        .insert(SpriteSheetBundle {
+            texture_atlas: texture_atlas_handle.clone(),
+            sprite: TextureAtlasSprite {
+                custom_size: Some(Vec2::new(92., 92.)),
+                ..default()
+            },
             transform: Transform::from_translation(Vec3::new(0., 0., 1.)),
-            ..Default::default()
+            ..default()
         });
 }
 
@@ -734,7 +888,10 @@ pub fn despawn_out_of_view(
     mut commands: Commands,
     camera_query: Query<(&Transform, &Velocity), With<Camera>>,
     is_player: Query<Entity, With<Player>>,
-    query: Query<(Entity, &ViewVisibility, &Transform)>,
+    query: Query<
+        (Entity, &ViewVisibility, &Transform),
+        (Without<LayerComponent>, Without<LayerTextureComponent>),
+    >,
     mut events: EventWriter<GameEvent>,
 ) {
     let camera_info = camera_query.get_single().unwrap();
@@ -829,6 +986,7 @@ pub fn time_score_system(
             score.to_string(),
             TextStyle {
                 font_size: 64.,
+                color: Color::DARK_GRAY,
                 ..default()
             },
         ));
@@ -850,6 +1008,7 @@ pub fn game_event_system(
                     TextBundle::from_section(
                         "Game Over",
                         TextStyle {
+                            color: Color::DARK_GRAY,
                             font_size: 64.,
                             ..default()
                         },
@@ -899,5 +1058,14 @@ pub fn enemy_system(
             (player_transform, &Velocity::zero()),
         );
         commands.entity(enemy).try_insert(velocity);
+    }
+}
+
+pub fn sprite_update_system(
+    time: Res<Time>,
+    mut query: Query<(&mut SpriteUpdate, &mut TextureAtlasSprite)>,
+) {
+    for (mut sprite_update, mut sprite) in query.iter_mut() {
+        sprite.index = sprite_update.tick_and_next(time.delta(), sprite.index);
     }
 }
