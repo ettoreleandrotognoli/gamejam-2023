@@ -287,6 +287,7 @@ pub struct Enemy {
     when_bigger: Strategy,
     when_smaller: Strategy,
     when_equal: Strategy,
+    inertia: f32,
 }
 
 impl Enemy {
@@ -295,6 +296,7 @@ impl Enemy {
             when_bigger: Strategy::None,
             when_smaller: Strategy::Follow { max_distance: 128. },
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -303,6 +305,7 @@ impl Enemy {
             when_bigger: Strategy::Follow { max_distance: 128. },
             when_smaller: Strategy::Run { max_distance: 128. },
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -311,6 +314,7 @@ impl Enemy {
             when_bigger: Strategy::Follow { max_distance: 128. },
             when_smaller: Strategy::None,
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -319,6 +323,7 @@ impl Enemy {
             when_bigger: Strategy::Follow { max_distance: 128. },
             when_smaller: Strategy::Follow { max_distance: 128. },
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -331,6 +336,7 @@ impl Enemy {
                 max_distance: f32::INFINITY,
             },
             when_equal: Strategy::None,
+            ..default()
         }
     }
 
@@ -346,7 +352,7 @@ impl Enemy {
         let direction = diff.normalize_or_zero();
         let distance = f32::max(diff.length() - player_radius, 0.);
 
-        let enemy_direction = if enemy_length > player_length {
+        let enemy_target_direction = if enemy_length > player_length {
             self.when_bigger.calc(direction, distance)
         } else if player_length > enemy_length {
             self.when_smaller.calc(direction, distance)
@@ -354,7 +360,11 @@ impl Enemy {
             self.when_equal.calc(direction, distance)
         };
 
-        Velocity::linear(enemy_direction * calc_speed(enemy.0))
+        let target_lin_velocity = enemy_target_direction * calc_speed(enemy.0);
+        let final_lin_dir =
+            enemy.1.linvel * self.inertia + target_lin_velocity * (1. - self.inertia);
+
+        Velocity::linear(final_lin_dir.normalize_or_zero() * calc_speed(enemy.0))
     }
 }
 
@@ -364,6 +374,7 @@ impl Default for Enemy {
             when_bigger: Strategy::None,
             when_smaller: Strategy::None,
             when_equal: Strategy::None,
+            inertia: 0.9,
         }
     }
 }
